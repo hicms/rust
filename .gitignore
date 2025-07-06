@@ -1,0 +1,29 @@
+# Rust generated files
+target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock file (keep for applications, exclude for libraries)
+# Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Log files
+*.log
+
+# Build artifacts
+/target
