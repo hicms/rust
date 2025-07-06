@@ -9,6 +9,8 @@
 - WebSocket 实时通信
 - 静态文件服务（HTML 测试页面）
 - 完整的测试界面
+- **OpenAPI 3.0 规范和 Swagger UI 文档界面**
+- **自动生成的 API 文档**
 
 ## 🛠 技术栈
 
@@ -18,6 +20,8 @@
 - **Serde** - JSON 序列化/反序列化
 - **Tower** - 中间件支持
 - **WebSocket** - 实时双向通信
+- **Utoipa** - OpenAPI 规范生成
+- **Swagger UI** - API 文档界面
 
 ## 📦 依赖说明
 
@@ -34,6 +38,8 @@ serde_json = "1.0"  # JSON 支持
 tokio-tungstenite = "0.21"  # WebSocket 实现
 futures-util = "0.3"  # 异步工具
 chrono = { version = "0.4", features = ["serde"] }  # 时间处理
+utoipa = { version = "4.2", features = ["axum_extras", "chrono"] }  # OpenAPI 规范生成
+utoipa-swagger-ui = { version = "6.0", features = ["axum"] }  # Swagger UI 界面
 ```
 
 ## 🚀 快速开始
@@ -52,9 +58,11 @@ cd axum_demo
 cargo run
 ```
 
-### 3. 访问测试页面
+### 3. 访问测试页面和 API 文档
 
-打开浏览器访问：http://127.0.0.1:3000
+- **主页面**：http://127.0.0.1:3000
+- **Swagger UI API 文档**：http://127.0.0.1:3000/swagger-ui
+- **OpenAPI JSON 规范**：http://127.0.0.1:3000/api-docs/openapi.json
 
 ## 📚 项目结构
 
@@ -67,6 +75,49 @@ axum_demo/
 └── static/
     └── index.html      # 测试页面
 ```
+
+## 📚 API 文档
+
+### Swagger UI 界面
+
+访问 [http://127.0.0.1:3000/swagger-ui](http://127.0.0.1:3000/swagger-ui) 可以查看交互式 API 文档，包括：
+
+- 📖 **完整的 API 接口列表**
+- 🔧 **在线测试功能** - 直接在浏览器中测试 API
+- 📋 **请求/响应示例**
+- 🏷️ **参数说明和验证规则**
+- 📊 **数据模型定义**
+
+### OpenAPI 规范
+
+访问 [http://127.0.0.1:3000/api-docs/openapi.json](http://127.0.0.1:3000/api-docs/openapi.json) 可以获取完整的 OpenAPI 3.0 规范文件，可用于：
+
+- 📦 **代码生成** - 使用工具生成客户端 SDK
+- 🧪 **自动化测试** - 基于规范进行 API 测试
+- 📖 **文档集成** - 集成到其他文档系统
+- ✅ **API 验证** - 验证 API 实现是否符合规范
+
+### OpenAPI 功能特性
+
+本项目的 OpenAPI 集成包含以下特性：
+
+1. **完整的 API 文档注解**
+   - 每个 API 端点都有详细描述
+   - 包含请求参数和响应格式说明
+   - 提供真实的示例数据
+
+2. **数据模型验证**
+   - 自动生成数据模式（Schema）
+   - 包含字段验证规则（长度、格式等）
+   - 支持示例数据展示
+
+3. **标签组织**
+   - API 按功能分组（users、system 等）
+   - 便于浏览和理解 API 结构
+
+4. **多服务器配置**
+   - 支持本地开发和生产环境配置
+   - 可轻松切换不同的 API 基础 URL
 
 ## 🔌 API 接口
 
@@ -177,7 +228,19 @@ socket.send('echo:Hello');     // 返回: Server echoed:Hello
 socket.send('任意消息');        // 返回: Server received:任意消息
 ```
 
-## 🎯 测试页面使用指南
+## 🎯 测试和文档使用指南
+
+### Swagger UI 使用指南
+
+1. **访问 API 文档**：打开 [http://127.0.0.1:3000/swagger-ui](http://127.0.0.1:3000/swagger-ui)
+2. **浏览 API 接口**：展开不同的标签（users、system）查看相关接口
+3. **测试 API**：
+   - 点击接口旁的 "Try it out" 按钮
+   - 填写必要的参数
+   - 点击 "Execute" 执行请求
+   - 查看响应结果和状态码
+
+### 传统测试页面使用指南
 
 访问 http://127.0.0.1:3000 可以看到完整的测试界面，分为两个部分：
 
@@ -926,6 +989,29 @@ let v2_routes = Router::new()
 let app = Router::new()
     .nest("/api/v1", v1_routes)
     .nest("/api/v2", v2_routes);
+```
+
+### Q: OpenAPI 文档没有显示我的 API
+A: 检查以下几点：
+1. 确保在 `#[derive(OpenApi)]` 的 `paths()` 中包含了你的函数
+2. 确保函数上有正确的 `#[utoipa::path(...)]` 注解
+3. 确保数据结构有 `#[derive(ToSchema)]` 注解
+4. 重新编译并重启服务器
+
+### Q: Swagger UI 页面无法加载
+A: 检查以下几点：
+1. 确保 `utoipa-swagger-ui` 依赖正确安装
+2. 确保路由配置正确：`.merge(SwaggerUi::new("/swagger-ui").url(...))`
+3. 检查浏览器控制台是否有 JavaScript 错误
+4. 确保访问正确的 URL：`http://localhost:3000/swagger-ui`
+
+### Q: 如何自定义 OpenAPI 文档的样式？
+A: 可以通过以下方式自定义：
+```rust
+// 自定义 Swagger UI 配置
+SwaggerUi::new("/swagger-ui")
+    .url("/api-docs/openapi.json", ApiDoc::openapi())
+    .config(utoipa_swagger_ui::Config::new(["/api-docs/openapi.json"]))
 ```
 
 ### 9. 数据库集成

@@ -1,13 +1,15 @@
 // Axum WebSocket 和 API 演示项目
 // 这是一个使用 Rust Axum 框架创建的 Web 服务器，支持 REST API 和 WebSocket
 
+#![allow(unused_imports)]
+
 // 导入需要的库和模块
 use axum::{
     // extract 模块用于从 HTTP 请求中提取数据
     extract::{Path, Query, WebSocketUpgrade, ws::{WebSocket, Message}},
     http::StatusCode,  // HTTP 状态码
     response::{Json, Response},  // 响应类型
-    routing::get,  // 路由方法
+    routing::{get, post},  // 路由方法
     Router,  // 路由器
 };
 use serde::{Deserialize, Serialize};  // 序列化和反序列化库，用于 JSON 处理
@@ -15,31 +17,89 @@ use std::collections::HashMap;  // 哈希映射数据结构
 use tower::ServiceBuilder;  // 中间件构建器
 use tower_http::{cors::CorsLayer, trace::TraceLayer, services::ServeDir};  // HTTP 中间件
 use tracing_subscriber;  // 日志系统
+use utoipa::{OpenApi, ToSchema, IntoParams};  // OpenAPI 文档生成
+use utoipa_swagger_ui::SwaggerUi;  // Swagger UI
+
+// ===== OpenAPI 文档定义 =====
+
+/// Axum WebSocket 和 API 演示项目 OpenAPI 规范
+/// 
+/// 这是一个使用 Rust Axum 框架创建的 Web 服务器演示项目，
+/// 展示了如何同时支持 REST API 和 WebSocket 连接。
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        get_user,
+        list_users, 
+        create_user,
+        health_check
+    ),
+    components(
+        schemas(User, CreateUser)
+    ),
+    tags(
+        (name = "users", description = "用户管理相关 API"),
+        (name = "system", description = "系统状态相关 API")
+    ),
+    info(
+        title = "Axum Demo API",
+        version = "0.1.0",
+        description = "一个使用 Rust Axum 框架的演示项目，包含 REST API 和 WebSocket 功能",
+        contact(
+            name = "API Support",
+            email = "support@example.com"
+        ),
+        license(
+            name = "MIT",
+            url = "https://opensource.org/licenses/MIT"
+        )
+    ),
+    servers(
+        (url = "http://localhost:3000", description = "本地开发服务器"),
+        (url = "https://api.example.com", description = "生产环境服务器")
+    )
+)]
+struct ApiDoc;
 
 // ===== 数据结构定义 =====
 
 // 用户数据结构
 // Serialize: 可以转换为 JSON
 // Deserialize: 可以从 JSON 转换回来
-#[derive(Serialize, Deserialize)]
+// ToSchema: 用于生成 OpenAPI 模式
+#[derive(Serialize, Deserialize, ToSchema)]
 struct User {
+    /// 用户唯一标识符
+    #[schema(example = 1)]
     id: u32,        // 用户 ID（无符号32位整数）
+    /// 用户名称
+    #[schema(example = "张三")]
     name: String,   // 用户名
+    /// 用户邮箱地址
+    #[schema(example = "zhangsan@example.com")]
     email: String,  // 邮箱
 }
 
 // 创建用户时的输入数据结构
 // 只需要 name 和 email，id 会自动生成
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct CreateUser {
+    /// 用户名称（2-50字符）
+    #[schema(example = "李四", min_length = 2, max_length = 50)]
     name: String,   // 用户名
+    /// 用户邮箱地址
+    #[schema(example = "lisi@example.com", format = "email")]
     email: String,  // 邮箱
 }
 
 // 查询用户列表时的参数结构
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
 struct UserQuery {
+    /// 限制返回数量，默认为 10
+    #[param(example = 10, minimum = 1, maximum = 100)]
     limit: Option<u32>,   // 限制返回数量（可选）
+    /// 偏移量，用于分页，默认为 0
+    #[param(example = 0, minimum = 0)]
     offset: Option<u32>,  // 偏移量，用于分页（可选）
 }
 
@@ -48,6 +108,18 @@ struct UserQuery {
 // 获取单个用户的处理函数
 // Path(user_id): 从 URL 路径中提取用户 ID
 // -> Result<Json<User>, StatusCode>: 返回用户 JSON 或错误状态码
+#[utoipa::path(
+    get,
+    path = "/api/users/{id}",
+    params(
+        ("id" = u32, Path, description = "用户ID", example = 1)
+    ),
+    responses(
+        (status = 200, description = "成功获取用户信息", body = User),
+        (status = 404, description = "用户不存在")
+    ),
+    tag = "users"
+)]
 async fn get_user(Path(user_id): Path<u32>) -> Result<Json<User>, StatusCode> {
     // 创建一个模拟的用户对象
     let user = User {
@@ -60,6 +132,15 @@ async fn get_user(Path(user_id): Path<u32>) -> Result<Json<User>, StatusCode> {
 
 // 获取用户列表的处理函数
 // Query(params): 从 URL 查询参数中提取分页信息
+#[utoipa::path(
+    get,
+    path = "/api/users",
+    params(UserQuery),
+    responses(
+        (status = 200, description = "成功获取用户列表", body = [User])
+    ),
+    tag = "users"
+)]
 async fn list_users(Query(params): Query<UserQuery>) -> Json<Vec<User>> {
     // 获取分页参数，如果没有提供则使用默认值
     let limit = params.limit.unwrap_or(10);   // 默认返回 10 个用户
@@ -79,6 +160,16 @@ async fn list_users(Query(params): Query<UserQuery>) -> Json<Vec<User>> {
 
 // 创建用户的处理函数
 // Json(payload): 从请求体中提取 JSON 数据
+#[utoipa::path(
+    post,
+    path = "/api/users",
+    request_body = CreateUser,
+    responses(
+        (status = 200, description = "成功创建用户", body = User),
+        (status = 400, description = "请求参数错误")
+    ),
+    tag = "users"
+)]
 async fn create_user(Json(payload): Json<CreateUser>) -> Result<Json<User>, StatusCode> {
     // 创建新用户对象
     let user = User {
@@ -91,6 +182,14 @@ async fn create_user(Json(payload): Json<CreateUser>) -> Result<Json<User>, Stat
 
 // 健康检查处理函数
 // 返回服务器状态信息
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    responses(
+        (status = 200, description = "服务器健康状态", body = HashMap<String, String>)
+    ),
+    tag = "system"
+)]
 async fn health_check() -> Json<HashMap<&'static str, &'static str>> {
     let mut response = HashMap::new();
     response.insert("status", "healthy");   // 服务器状态
@@ -171,6 +270,9 @@ async fn main() {
         .route("/api/users", get(list_users).post(create_user))     // 用户列表（GET）和创建用户（POST）
         .route("/api/users/:id", get(get_user))                     // 获取特定用户（GET）
         
+        // Swagger UI 路由：提供 API 文档界面
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        
         // 静态文件服务：为根路径 "/" 提供 "static" 目录中的文件
         .nest_service("/", ServeDir::new("static"))
         
@@ -186,6 +288,8 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     println!("Server running on http://0.0.0.0:3000");
     println!("Visit http://127.0.0.1:3000 to access the web interface");
+    println!("Visit http://127.0.0.1:3000/swagger-ui to access the API documentation");
+    println!("Visit http://127.0.0.1:3000/api-docs/openapi.json to get the OpenAPI spec");
 
     // 启动服务器，开始处理请求
     axum::serve(listener, app).await.unwrap();
