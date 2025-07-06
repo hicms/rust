@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(mkdir:*)",
-      "Bash(cargo:*)"
+      "Bash(cargo:*)",
+      "Bash(timeout 5 cargo run)"
     ],
     "deny": []
   }
