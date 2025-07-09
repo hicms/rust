@@ -7592,36 +7592,831 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Demo 2**: 断路器模式，展示了服务保护和自动降级
 - **Demo 3**: 高级恢复策略，展示了错误分类、负载感知和指标监控
 
-### 错误的上下文信息
+### 错误的上下文信息详解
+
+错误上下文信息是高级错误处理的核心概念，它解决了单纯错误类型无法提供足够调试信息的问题。通过添加上下文，我们可以构建完整的错误调用链，明确错误发生的位置和原因。
+
+#### 为什么需要错误上下文？
+
+在复杂的系统中，一个错误可能经过多个函数层级的传播。没有上下文信息，我们很难追踪错误的真正来源：
+
+```mermaid
+graph TB
+    A["❌ 没有上下文：file not found"] --> B["开发者困惑：哪个文件？"]
+    B --> C["在哪个操作中？"]
+    C --> D["由什么触发？"]
+    
+    E["✅ 有上下文：Processing user config"] --> F["While reading config file"]
+    F --> G["config.toml not found"]
+    G --> H["For user: alice"]
+    H --> I["开发者立即明确错误位置和原因"]
+    
+    style A fill:#ffebee
+    style E fill:#e8f5e8
+    style I fill:#e8f5e8
+```
+
+#### Demo 1: 基础错误上下文系统
 
 ```rust
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use std::fs;
+use std::collections::HashMap;
 
-fn read_config() -> Result<Config> {
-    let config_str = std::fs::read_to_string("config.toml")
-        .context("Failed to read config file")?;
-    
-    let config: Config = toml::from_str(&config_str)
-        .context("Failed to parse config file")?;
-    
-    Ok(config)
+// 配置结构
+#[derive(Debug, Clone)]
+struct AppConfig {
+    database_url: String,
+    api_key: String,
+    port: u16,
+    features: Vec<String>,
 }
 
-// 添加更多上下文
-fn process_user_data(user_id: u64) -> Result<UserData> {
-    let user = fetch_user(user_id)
-        .with_context(|| format!("Failed to fetch user {}", user_id))?;
-    
-    let permissions = fetch_permissions(&user)
-        .with_context(|| format!("Failed to fetch permissions for user {}", user.name))?;
-    
-    Ok(UserData { user, permissions })
+// 用户数据结构
+#[derive(Debug)]
+struct UserProfile {
+    id: u64,
+    name: String,
+    email: String,
+    preferences: HashMap<String, String>,
 }
+
+// 基础错误上下文系统
+struct ConfigManager {
+    config_path: String,
+    cache: Option<AppConfig>,
+}
+
+impl ConfigManager {
+    fn new(config_path: String) -> Self {
+        Self {
+            config_path,
+            cache: None,
+        }
+    }
+
+    fn load_config(&mut self) -> Result<&AppConfig> {
+        if self.cache.is_none() {
+            let content = fs::read_to_string(&self.config_path)
+                .with_context(|| format!("Failed to read config file: {}", self.config_path))?;
+            
+            let config = self.parse_config(&content)
+                .with_context(|| format!("Failed to parse config from file: {}", self.config_path))?;
+            
+            self.cache = Some(config);
+        }
+        
+        Ok(self.cache.as_ref().unwrap())
+    }
+
+    fn parse_config(&self, content: &str) -> Result<AppConfig> {
+        let mut lines = content.lines();
+        let mut config = AppConfig {
+            database_url: String::new(),
+            api_key: String::new(),
+            port: 8080,
+            features: Vec::new(),
+        };
+
+        while let Some(line) = lines.next() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split('=').collect();
+            if parts.len() != 2 {
+                bail!("Invalid config line format: '{}' - expected 'key=value'", line);
+            }
+
+            let key = parts[0].trim();
+            let value = parts[1].trim();
+
+            match key {
+                "database_url" => {
+                    if value.is_empty() {
+                        bail!("Database URL cannot be empty");
+                    }
+                    config.database_url = value.to_string();
+                },
+                "api_key" => {
+                    if value.len() < 10 {
+                        bail!("API key too short: {} characters (minimum 10)", value.len());
+                    }
+                    config.api_key = value.to_string();
+                },
+                "port" => {
+                    config.port = value.parse::<u16>()
+                        .with_context(|| format!("Invalid port number: '{}'", value))?;
+                },
+                "features" => {
+                    config.features = value.split(',')
+                        .map(|s| s.trim().to_string())
+                        .collect();
+                },
+                _ => bail!("Unknown config key: '{}'", key),
+            }
+        }
+
+        if config.database_url.is_empty() {
+            bail!("Required config field 'database_url' is missing");
+        }
+
+        Ok(config)
+    }
+
+    fn get_user_profile(&self, user_id: u64) -> Result<UserProfile> {
+        let config = self.cache.as_ref()
+            .context("Config not loaded - call load_config() first")?;
+        
+        // 模拟数据库查询
+        if user_id == 0 {
+            bail!("Invalid user ID: 0");
+        }
+
+        let profile = UserProfile {
+            id: user_id,
+            name: format!("user_{}", user_id),
+            email: format!("user_{}@example.com", user_id),
+            preferences: HashMap::new(),
+        };
+
+        Ok(profile)
+    }
+
+    fn validate_user_access(&self, user_id: u64, resource: &str) -> Result<()> {
+        let profile = self.get_user_profile(user_id)
+            .with_context(|| format!("Failed to get profile for user {}", user_id))?;
+        
+        let config = self.cache.as_ref().unwrap();
+        
+        // 检查功能是否启用
+        if !config.features.contains(&"user_access_control".to_string()) {
+            bail!("User access control feature is disabled");
+        }
+
+        // 模拟权限检查
+        if resource == "admin" && user_id != 1 {
+            bail!("User {} does not have admin access to resource '{}'", profile.name, resource);
+        }
+
+        Ok(())
+    }
+}
+
+// 使用示例
+fn process_user_request(user_id: u64, resource: &str) -> Result<String> {
+    let mut config_manager = ConfigManager::new("app.config".to_string());
+    
+    config_manager.load_config()
+        .context("Failed to initialize application configuration")?;
+    
+    config_manager.validate_user_access(user_id, resource)
+        .with_context(|| format!("Access validation failed for user {} to resource '{}'", user_id, resource))?;
+    
+    let profile = config_manager.get_user_profile(user_id)
+        .with_context(|| format!("Failed to process request for user {}", user_id))?;
+    
+    Ok(format!("Request processed successfully for user: {}", profile.name))
+}
+
+// 测试函数
+fn demo_error_context() {
+    println!("=== Demo 1: 基础错误上下文系统 ===");
+    
+    // 成功案例
+    match process_user_request(1, "admin") {
+        Ok(result) => println!("✅ Success: {}", result),
+        Err(e) => println!("❌ Error: {}", e),
+    }
+    
+    // 失败案例 - 显示完整的错误链
+    match process_user_request(999, "admin") {
+        Ok(result) => println!("✅ Success: {}", result),
+        Err(e) => {
+            println!("❌ Error: {}", e);
+            println!("   Error chain:");
+            let mut current = e.source();
+            let mut level = 1;
+            while let Some(err) = current {
+                println!("   {}: {}", level, err);
+                current = err.source();
+                level += 1;
+            }
+        }
+    }
+}
+```
+
+#### Demo 2: 自定义错误上下文系统
+
+```rust
+use std::error::Error;
+use std::fmt;
+use std::collections::HashMap;
+use std::time::{SystemTime, Duration};
+
+// 自定义错误上下文结构
+#[derive(Debug)]
+struct ErrorContext {
+    operation: String,
+    component: String,
+    timestamp: SystemTime,
+    metadata: HashMap<String, String>,
+    user_id: Option<u64>,
+}
+
+impl ErrorContext {
+    fn new(operation: &str, component: &str) -> Self {
+        Self {
+            operation: operation.to_string(),
+            component: component.to_string(),
+            timestamp: SystemTime::now(),
+            metadata: HashMap::new(),
+            user_id: None,
+        }
+    }
+
+    fn with_user(mut self, user_id: u64) -> Self {
+        self.user_id = Some(user_id);
+        self
+    }
+
+    fn with_metadata(mut self, key: &str, value: &str) -> Self {
+        self.metadata.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.timestamp.elapsed().unwrap_or_default()
+    }
+}
+
+// 带上下文的错误类型
+#[derive(Debug)]
+struct ContextualError {
+    message: String,
+    context: ErrorContext,
+    source: Option<Box<dyn Error + Send + Sync>>,
+}
+
+impl fmt::Display for ContextualError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}::{}] {}", self.context.component, self.context.operation, self.message)?;
+        
+        if let Some(user_id) = self.context.user_id {
+            write!(f, " (user: {})", user_id)?;
+        }
+        
+        if !self.context.metadata.is_empty() {
+            write!(f, " - metadata: {:?}", self.context.metadata)?;
+        }
+        
+        write!(f, " ({}ms ago)", self.context.elapsed().as_millis())?;
+        
+        Ok(())
+    }
+}
+
+impl Error for ContextualError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source.as_deref()
+    }
+}
+
+// 错误上下文构建器
+struct ErrorBuilder {
+    context: ErrorContext,
+}
+
+impl ErrorBuilder {
+    fn new(operation: &str, component: &str) -> Self {
+        Self {
+            context: ErrorContext::new(operation, component),
+        }
+    }
+
+    fn user(mut self, user_id: u64) -> Self {
+        self.context = self.context.with_user(user_id);
+        self
+    }
+
+    fn metadata(mut self, key: &str, value: &str) -> Self {
+        self.context = self.context.with_metadata(key, value);
+        self
+    }
+
+    fn build(self, message: &str) -> ContextualError {
+        ContextualError {
+            message: message.to_string(),
+            context: self.context,
+            source: None,
+        }
+    }
+
+    fn wrap<E: Error + Send + Sync + 'static>(self, error: E, message: &str) -> ContextualError {
+        ContextualError {
+            message: message.to_string(),
+            context: self.context,
+            source: Some(Box::new(error)),
+        }
+    }
+}
+
+// 业务逻辑示例
+struct DataService {
+    cache: HashMap<u64, String>,
+}
+
+impl DataService {
+    fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    fn fetch_user_data(&mut self, user_id: u64) -> Result<String, ContextualError> {
+        if user_id == 0 {
+            return Err(ErrorBuilder::new("fetch_user_data", "DataService")
+                .user(user_id)
+                .metadata("validation", "user_id_zero")
+                .build("Invalid user ID: cannot be zero"));
+        }
+
+        if user_id > 1000 {
+            return Err(ErrorBuilder::new("fetch_user_data", "DataService")
+                .user(user_id)
+                .metadata("validation", "user_id_too_large")
+                .metadata("max_user_id", "1000")
+                .build("User ID exceeds maximum allowed value"));
+        }
+
+        // 模拟网络延迟
+        std::thread::sleep(Duration::from_millis(10));
+
+        // 检查缓存
+        if let Some(cached_data) = self.cache.get(&user_id) {
+            return Ok(cached_data.clone());
+        }
+
+        // 模拟数据库查询
+        let data = format!("user_data_{}", user_id);
+        self.cache.insert(user_id, data.clone());
+
+        Ok(data)
+    }
+
+    fn process_user_request(&mut self, user_id: u64, operation: &str) -> Result<String, ContextualError> {
+        let user_data = self.fetch_user_data(user_id)
+            .map_err(|e| ErrorBuilder::new("process_user_request", "DataService")
+                .user(user_id)
+                .metadata("operation", operation)
+                .metadata("step", "fetch_user_data")
+                .wrap(e, "Failed to fetch user data for request processing"))?;
+
+        // 模拟业务逻辑
+        match operation {
+            "read" => Ok(format!("Read operation completed for: {}", user_data)),
+            "write" => {
+                if user_id % 2 == 0 {
+                    Err(ErrorBuilder::new("process_user_request", "DataService")
+                        .user(user_id)
+                        .metadata("operation", operation)
+                        .metadata("error_type", "permission_denied")
+                        .build("Write operation not allowed for even user IDs"))
+                } else {
+                    Ok(format!("Write operation completed for: {}", user_data))
+                }
+            },
+            _ => Err(ErrorBuilder::new("process_user_request", "DataService")
+                .user(user_id)
+                .metadata("operation", operation)
+                .metadata("supported_operations", "read,write")
+                .build("Unsupported operation")),
+        }
+    }
+}
+
+// 测试函数
+fn demo_custom_error_context() {
+    println!("=== Demo 2: 自定义错误上下文系统 ===");
+    
+    let mut service = DataService::new();
+    
+    // 测试不同场景
+    let test_cases = vec![
+        (123, "read"),
+        (0, "read"),     // 无效用户ID
+        (456, "write"),  // 写权限拒绝
+        (999, "delete"), // 不支持的操作
+    ];
+
+    for (user_id, operation) in test_cases {
+        match service.process_user_request(user_id, operation) {
+            Ok(result) => println!("✅ Success: {}", result),
+            Err(e) => {
+                println!("❌ Error: {}", e);
+                // 显示完整错误链
+                if let Some(source) = e.source() {
+                    println!("   └─ Caused by: {}", source);
+                }
+            }
+        }
+    }
+}
+```
+
+#### Demo 3: 高级错误上下文与调试信息
+
+```rust
+use std::error::Error;
+use std::fmt;
+use std::collections::HashMap;
+use std::time::{SystemTime, Instant};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// 错误追踪ID生成器
+static ERROR_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+// 高级错误上下文
+#[derive(Debug, Clone)]
+struct AdvancedErrorContext {
+    error_id: u64,
+    operation: String,
+    component: String,
+    timestamp: SystemTime,
+    execution_time: Option<Duration>,
+    metadata: HashMap<String, String>,
+    tags: Vec<String>,
+    user_context: Option<UserContext>,
+    system_context: SystemContext,
+}
+
+#[derive(Debug, Clone)]
+struct UserContext {
+    user_id: u64,
+    session_id: String,
+    request_id: String,
+    ip_address: String,
+}
+
+#[derive(Debug, Clone)]
+struct SystemContext {
+    thread_id: String,
+    memory_usage: u64,
+    cpu_usage: f64,
+    process_id: u32,
+}
+
+impl AdvancedErrorContext {
+    fn new(operation: &str, component: &str) -> Self {
+        Self {
+            error_id: ERROR_ID_COUNTER.fetch_add(1, Ordering::SeqCst),
+            operation: operation.to_string(),
+            component: component.to_string(),
+            timestamp: SystemTime::now(),
+            execution_time: None,
+            metadata: HashMap::new(),
+            tags: Vec::new(),
+            user_context: None,
+            system_context: SystemContext {
+                thread_id: format!("{:?}", std::thread::current().id()),
+                memory_usage: 0, // 在实际应用中可以获取真实内存使用
+                cpu_usage: 0.0,
+                process_id: std::process::id(),
+            },
+        }
+    }
+
+    fn with_user_context(mut self, user_context: UserContext) -> Self {
+        self.user_context = Some(user_context);
+        self
+    }
+
+    fn with_metadata(mut self, key: &str, value: &str) -> Self {
+        self.metadata.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    fn with_tag(mut self, tag: &str) -> Self {
+        self.tags.push(tag.to_string());
+        self
+    }
+
+    fn with_execution_time(mut self, duration: Duration) -> Self {
+        self.execution_time = Some(duration);
+        self
+    }
+}
+
+// 高级错误类型
+#[derive(Debug)]
+struct AdvancedError {
+    message: String,
+    context: AdvancedErrorContext,
+    source: Option<Box<dyn Error + Send + Sync>>,
+    suggestions: Vec<String>,
+}
+
+impl fmt::Display for AdvancedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Error #{}: {}", self.context.error_id, self.message)?;
+        writeln!(f, "  Operation: {}::{}", self.context.component, self.context.operation)?;
+        writeln!(f, "  Timestamp: {:?}", self.context.timestamp)?;
+        
+        if let Some(execution_time) = self.context.execution_time {
+            writeln!(f, "  Execution time: {:?}", execution_time)?;
+        }
+
+        if let Some(user_ctx) = &self.context.user_context {
+            writeln!(f, "  User: {} (session: {}, request: {})", 
+                user_ctx.user_id, user_ctx.session_id, user_ctx.request_id)?;
+        }
+
+        writeln!(f, "  System: thread={}, pid={}", 
+            self.context.system_context.thread_id, 
+            self.context.system_context.process_id)?;
+
+        if !self.context.metadata.is_empty() {
+            writeln!(f, "  Metadata: {:?}", self.context.metadata)?;
+        }
+
+        if !self.context.tags.is_empty() {
+            writeln!(f, "  Tags: {:?}", self.context.tags)?;
+        }
+
+        if !self.suggestions.is_empty() {
+            writeln!(f, "  Suggestions:")?;
+            for suggestion in &self.suggestions {
+                writeln!(f, "    - {}", suggestion)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Error for AdvancedError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source.as_deref()
+    }
+}
+
+// 高级错误构建器
+struct AdvancedErrorBuilder {
+    context: AdvancedErrorContext,
+    suggestions: Vec<String>,
+    start_time: Option<Instant>,
+}
+
+impl AdvancedErrorBuilder {
+    fn new(operation: &str, component: &str) -> Self {
+        Self {
+            context: AdvancedErrorContext::new(operation, component),
+            suggestions: Vec::new(),
+            start_time: Some(Instant::now()),
+        }
+    }
+
+    fn user_context(mut self, user_context: UserContext) -> Self {
+        self.context = self.context.with_user_context(user_context);
+        self
+    }
+
+    fn metadata(mut self, key: &str, value: &str) -> Self {
+        self.context = self.context.with_metadata(key, value);
+        self
+    }
+
+    fn tag(mut self, tag: &str) -> Self {
+        self.context = self.context.with_tag(tag);
+        self
+    }
+
+    fn suggestion(mut self, suggestion: &str) -> Self {
+        self.suggestions.push(suggestion.to_string());
+        self
+    }
+
+    fn build(mut self, message: &str) -> AdvancedError {
+        if let Some(start_time) = self.start_time {
+            self.context = self.context.with_execution_time(start_time.elapsed());
+        }
+
+        AdvancedError {
+            message: message.to_string(),
+            context: self.context,
+            source: None,
+            suggestions: self.suggestions,
+        }
+    }
+
+    fn wrap<E: Error + Send + Sync + 'static>(mut self, error: E, message: &str) -> AdvancedError {
+        if let Some(start_time) = self.start_time {
+            self.context = self.context.with_execution_time(start_time.elapsed());
+        }
+
+        AdvancedError {
+            message: message.to_string(),
+            context: self.context,
+            source: Some(Box::new(error)),
+            suggestions: self.suggestions,
+        }
+    }
+}
+
+// 业务服务示例
+struct AdvancedService {
+    data_store: HashMap<u64, String>,
+    request_count: AtomicU64,
+}
+
+impl AdvancedService {
+    fn new() -> Self {
+        Self {
+            data_store: HashMap::new(),
+            request_count: AtomicU64::new(0),
+        }
+    }
+
+    fn process_complex_request(&mut self, user_id: u64, operation: &str, data: &str) -> Result<String, AdvancedError> {
+        let request_id = self.request_count.fetch_add(1, Ordering::SeqCst);
+        
+        let user_context = UserContext {
+            user_id,
+            session_id: format!("sess_{}", user_id),
+            request_id: format!("req_{}", request_id),
+            ip_address: "127.0.0.1".to_string(),
+        };
+
+        let start_time = Instant::now();
+
+        // 输入验证
+        if user_id == 0 {
+            return Err(AdvancedErrorBuilder::new("process_complex_request", "AdvancedService")
+                .user_context(user_context)
+                .metadata("validation_field", "user_id")
+                .metadata("validation_value", "0")
+                .tag("validation_error")
+                .tag("user_input")
+                .suggestion("Use a valid user ID greater than 0")
+                .suggestion("Check user authentication status")
+                .build("Invalid user ID: cannot be zero"));
+        }
+
+        if data.is_empty() {
+            return Err(AdvancedErrorBuilder::new("process_complex_request", "AdvancedService")
+                .user_context(user_context)
+                .metadata("validation_field", "data")
+                .metadata("operation", operation)
+                .tag("validation_error")
+                .tag("empty_data")
+                .suggestion("Provide non-empty data for processing")
+                .suggestion("Check data serialization before sending")
+                .build("Empty data provided"));
+        }
+
+        // 模拟复杂处理
+        std::thread::sleep(Duration::from_millis(50));
+
+        match operation {
+            "store" => {
+                if self.data_store.len() >= 100 {
+                    return Err(AdvancedErrorBuilder::new("process_complex_request", "AdvancedService")
+                        .user_context(user_context)
+                        .metadata("operation", operation)
+                        .metadata("current_count", &self.data_store.len().to_string())
+                        .metadata("max_count", "100")
+                        .tag("storage_full")
+                        .tag("capacity_limit")
+                        .suggestion("Clear old data entries")
+                        .suggestion("Increase storage capacity")
+                        .suggestion("Implement data archiving")
+                        .build("Storage capacity exceeded"));
+                }
+
+                self.data_store.insert(user_id, data.to_string());
+                Ok(format!("Data stored successfully for user {}", user_id))
+            },
+            "retrieve" => {
+                if let Some(stored_data) = self.data_store.get(&user_id) {
+                    Ok(stored_data.clone())
+                } else {
+                    Err(AdvancedErrorBuilder::new("process_complex_request", "AdvancedService")
+                        .user_context(user_context)
+                        .metadata("operation", operation)
+                        .metadata("lookup_key", &user_id.to_string())
+                        .metadata("available_keys", &format!("{:?}", self.data_store.keys().collect::<Vec<_>>()))
+                        .tag("data_not_found")
+                        .tag("retrieval_error")
+                        .suggestion("Verify the user ID exists")
+                        .suggestion("Check if data was previously stored")
+                        .suggestion("Use 'store' operation to save data first")
+                        .build("No data found for user"))
+                }
+            },
+            "analyze" => {
+                if data.len() < 10 {
+                    return Err(AdvancedErrorBuilder::new("process_complex_request", "AdvancedService")
+                        .user_context(user_context)
+                        .metadata("operation", operation)
+                        .metadata("data_length", &data.len().to_string())
+                        .metadata("min_length", "10")
+                        .tag("insufficient_data")
+                        .tag("analysis_error")
+                        .suggestion("Provide at least 10 characters of data")
+                        .suggestion("Combine multiple data sources")
+                        .build("Insufficient data for analysis"));
+                }
+
+                let analysis = format!("Analysis complete: {} characters processed", data.len());
+                Ok(analysis)
+            },
+            _ => {
+                Err(AdvancedErrorBuilder::new("process_complex_request", "AdvancedService")
+                    .user_context(user_context)
+                    .metadata("operation", operation)
+                    .metadata("supported_operations", "store,retrieve,analyze")
+                    .tag("unsupported_operation")
+                    .tag("validation_error")
+                    .suggestion("Use one of the supported operations: store, retrieve, analyze")
+                    .suggestion("Check API documentation for valid operations")
+                    .build("Unsupported operation"))
+            }
+        }
+    }
+}
+
+// 测试函数
+fn demo_advanced_error_context() {
+    println!("=== Demo 3: 高级错误上下文与调试信息 ===");
+    
+    let mut service = AdvancedService::new();
+    
+    // 测试场景
+    let test_cases = vec![
+        (123, "store", "sample data for user 123"),
+        (123, "retrieve", ""),
+        (0, "store", "invalid user data"),      // 无效用户ID
+        (456, "analyze", "short"),              // 数据太短
+        (789, "delete", "some data"),           // 不支持的操作
+    ];
+
+    for (user_id, operation, data) in test_cases {
+        println!("\n--- Processing: user={}, operation={}, data_len={} ---", 
+            user_id, operation, data.len());
+        
+        match service.process_complex_request(user_id, operation, data) {
+            Ok(result) => println!("✅ Success: {}", result),
+            Err(e) => {
+                println!("❌ {}", e);
+                if let Some(source) = e.source() {
+                    println!("   └─ Caused by: {}", source);
+                }
+            }
+        }
+    }
+}
+```
+
+#### 总结
+
+这三个demo展示了错误上下文信息的不同层次和应用场景：
+
+- **Demo 1**: 基础错误上下文，展示了如何使用 `anyhow` 库添加简单但有效的错误上下文
+- **Demo 2**: 自定义错误上下文，展示了如何构建自己的错误上下文系统，包含详细的元数据和时间信息
+- **Demo 3**: 高级错误上下文，展示了企业级错误处理系统，包含完整的调试信息、建议和追踪功能
+
+```mermaid
+graph TB
+    A["错误上下文的价值"] --> B["快速定位问题"]
+    A --> C["提供调试信息"]
+    A --> D["改善用户体验"]
+    A --> E["支持错误分析"]
+    
+    B --> F["明确错误发生的位置"]
+    B --> G["显示完整的调用链"]
+    
+    C --> H["包含相关的元数据"]
+    C --> I["记录执行时间和系统状态"]
+    
+    D --> J["提供有意义的错误消息"]
+    D --> K["给出解决建议"]
+    
+    E --> L["支持错误统计和监控"]
+    E --> M["帮助识别系统瓶颈"]
+    
+    style A fill:#e3f2fd
+    style B fill:#f3e5f5
+    style C fill:#e8f5e8
+    style D fill:#fff3e0
+    style E fill:#fce4ec
 ```
 
 ---
 
-## 4. 高级异步编程
+## 4. 高级异步编程详解
 
 ### 异步编程模型对比
 
@@ -7632,109 +8427,626 @@ fn process_user_data(user_id: u64) -> Result<UserData> {
 | **Java** | CompletableFuture | 多线程，复杂 |
 | **Rust** | async/await + Future | 零成本抽象，多线程安全 |
 
-### Stream 和异步迭代器
+Rust 的异步编程模型具有以下独特优势：
+
+```mermaid
+graph TB
+    A["Rust 异步编程优势"] --> B["零成本抽象"]
+    A --> C["内存安全"]
+    A --> D["并发安全"]
+    A --> E["性能卓越"]
+    
+    B --> F["编译时优化"]
+    B --> G["无运行时开销"]
+    
+    C --> H["编译时内存检查"]
+    C --> I["避免数据竞争"]
+    
+    D --> J["Send + Sync trait"]
+    D --> K["类型系统保证"]
+    
+    E --> L["接近原生线程性能"]
+    E --> M["高效的任务调度"]
+    
+    style A fill:#e3f2fd
+    style B fill:#f3e5f5
+    style C fill:#e8f5e8
+    style D fill:#fff3e0
+    style E fill:#fce4ec
+```
+
+### Stream 和异步迭代器详解
+
+Stream 是异步版本的迭代器，允许我们处理异步产生的数据流。与同步迭代器不同，Stream 可以在不阻塞的情况下产生元素。
+
+#### Demo 1: 基础 Stream 操作与自定义实现
 
 ```rust
 use futures::stream::{Stream, StreamExt};
 use tokio_stream::wrappers::IntervalStream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use std::collections::VecDeque;
 
-// 异步流处理
-async fn process_stream() {
-    let interval = tokio::time::interval(Duration::from_secs(1));
-    let stream = IntervalStream::new(interval);
+// 基础 Stream 操作
+async fn basic_stream_operations() {
+    println!("=== Demo 1: 基础 Stream 操作 ===");
     
-    stream
-        .take(10)
-        .for_each(|_| async {
-            println!("Tick!");
+    // 从定时器创建 Stream
+    let interval = tokio::time::interval(Duration::from_millis(500));
+    let mut stream = IntervalStream::new(interval);
+    
+    // 基本 Stream 操作
+    let processed = stream
+        .take(5)  // 取前5个元素
+        .enumerate()  // 添加索引
+        .map(|(i, _)| format!("Item {}", i))  // 转换
+        .collect::<Vec<_>>()  // 收集到向量
+        .await;
+    
+    println!("处理结果: {:?}", processed);
+    
+    // 使用 for_each 处理每个元素
+    let numbers = futures::stream::iter(0..5);
+    numbers
+        .for_each(|n| async move {
+            println!("Processing number: {}", n);
+            tokio::time::sleep(Duration::from_millis(100)).await;
         })
         .await;
 }
 
-// 自定义异步迭代器
-struct AsyncCounter {
+// 自定义异步数据生成器
+struct AsyncDataGenerator {
     current: usize,
     max: usize,
+    delay: Duration,
 }
 
-impl AsyncCounter {
-    fn new(max: usize) -> Self {
-        Self { current: 0, max }
+impl AsyncDataGenerator {
+    fn new(max: usize, delay: Duration) -> Self {
+        Self { current: 0, max, delay }
     }
 }
 
-impl Stream for AsyncCounter {
-    type Item = usize;
+impl Stream for AsyncDataGenerator {
+    type Item = String;
     
     fn poll_next(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>
     ) -> Poll<Option<Self::Item>> {
-        if self.current < self.max {
-            let current = self.current;
-            self.current += 1;
-            Poll::Ready(Some(current))
-        } else {
-            Poll::Ready(None)
+        if self.current >= self.max {
+            return Poll::Ready(None);
+        }
+        
+        let current = self.current;
+        self.current += 1;
+        
+        // 模拟异步延迟
+        let delay = self.delay;
+        let waker = cx.waker().clone();
+        
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            waker.wake();
+        });
+        
+        Poll::Ready(Some(format!("Data item {}", current)))
+    }
+}
+
+// 高级 Stream 组合
+async fn advanced_stream_composition() {
+    println!("=== 高级 Stream 组合 ===");
+    
+    let generator = AsyncDataGenerator::new(6, Duration::from_millis(200));
+    
+    let results = generator
+        .filter(|item| {
+            let item_num = item.chars().last().unwrap().to_digit(10).unwrap();
+            async move { item_num % 2 == 0 }
+        })
+        .then(|item| async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            item.to_uppercase()
+        })
+        .collect::<Vec<_>>()
+        .await;
+    
+    println!("过滤和转换结果: {:?}", results);
+}
+
+// 并发 Stream 处理
+async fn concurrent_stream_processing() {
+    println!("=== 并发 Stream 处理 ===");
+    
+    let numbers = futures::stream::iter(0..8);
+    
+    // 并发处理每个元素
+    let results = numbers
+        .map(|n| async move {
+            // 模拟异步处理
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            n * n
+        })
+        .buffer_unordered(3)  // 最多并发3个任务
+        .collect::<Vec<_>>()
+        .await;
+    
+    println!("并发处理结果: {:?}", results);
+}
+
+async fn demo_stream_operations() {
+    basic_stream_operations().await;
+    advanced_stream_composition().await;
+    concurrent_stream_processing().await;
+}
+```
+
+#### Demo 2: 复杂数据流处理系统
+
+```rust
+use futures::stream::{Stream, StreamExt};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
+
+// 事件类型定义
+#[derive(Debug, Clone)]
+enum Event {
+    UserAction { user_id: u64, action: String, timestamp: Instant },
+    SystemMetric { metric_name: String, value: f64, timestamp: Instant },
+    ErrorEvent { error_type: String, message: String, timestamp: Instant },
+}
+
+// 事件流生成器
+struct EventStream {
+    receiver: mpsc::Receiver<Event>,
+}
+
+impl EventStream {
+    fn new() -> (Self, mpsc::Sender<Event>) {
+        let (sender, receiver) = mpsc::channel(100);
+        (Self { receiver }, sender)
+    }
+}
+
+impl Stream for EventStream {
+    type Item = Event;
+    
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<Option<Self::Item>> {
+        match self.receiver.poll_recv(cx) {
+            Poll::Ready(Some(event)) => Poll::Ready(Some(event)),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
 
-// 流的组合和转换
-async fn stream_operations() {
-    let counter = AsyncCounter::new(5);
+// 数据流处理器
+struct StreamProcessor {
+    user_actions: HashMap<u64, Vec<String>>,
+    system_metrics: HashMap<String, Vec<f64>>,
+    error_count: usize,
+}
+
+impl StreamProcessor {
+    fn new() -> Self {
+        Self {
+            user_actions: HashMap::new(),
+            system_metrics: HashMap::new(),
+            error_count: 0,
+        }
+    }
     
-    let doubled: Vec<usize> = counter
-        .map(|x| x * 2)
-        .filter(|&x| x > 2)
-        .collect()
-        .await;
+    fn process_event(&mut self, event: Event) {
+        match event {
+            Event::UserAction { user_id, action, timestamp } => {
+                self.user_actions.entry(user_id).or_insert_with(Vec::new).push(action);
+                println!("用户 {} 执行操作，时间戳: {:?}", user_id, timestamp);
+            }
+            Event::SystemMetric { metric_name, value, timestamp } => {
+                self.system_metrics.entry(metric_name.clone()).or_insert_with(Vec::new).push(value);
+                println!("系统指标 {}: {:.2}，时间戳: {:?}", metric_name, value, timestamp);
+            }
+            Event::ErrorEvent { error_type, message, timestamp } => {
+                self.error_count += 1;
+                println!("错误事件 [{}]: {}，时间戳: {:?}", error_type, message, timestamp);
+            }
+        }
+    }
     
-    println!("Doubled and filtered: {:?}", doubled);
+    fn get_summary(&self) -> String {
+        format!(
+            "处理汇总: {} 个用户动作, {} 个系统指标, {} 个错误事件",
+            self.user_actions.len(),
+            self.system_metrics.len(),
+            self.error_count
+        )
+    }
+}
+
+// 流分析器
+struct StreamAnalyzer;
+
+impl StreamAnalyzer {
+    async fn analyze_user_patterns(events: impl Stream<Item = Event>) -> HashMap<u64, usize> {
+        let mut user_activity = HashMap::new();
+        
+        events
+            .filter_map(|event| async move {
+                match event {
+                    Event::UserAction { user_id, .. } => Some(user_id),
+                    _ => None,
+                }
+            })
+            .for_each(|user_id| {
+                let user_activity = &mut user_activity;
+                async move {
+                    *user_activity.entry(user_id).or_insert(0) += 1;
+                }
+            })
+            .await;
+        
+        user_activity
+    }
+    
+    async fn detect_system_anomalies(events: impl Stream<Item = Event>) -> Vec<String> {
+        let mut anomalies = Vec::new();
+        
+        events
+            .filter_map(|event| async move {
+                match event {
+                    Event::SystemMetric { metric_name, value, .. } => {
+                        if value > 80.0 {  // 阈值检测
+                            Some(format!("异常指标: {} = {:.2}", metric_name, value))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .for_each(|anomaly| {
+                let anomalies = &mut anomalies;
+                async move {
+                    anomalies.push(anomaly);
+                }
+            })
+            .await;
+        
+        anomalies
+    }
+}
+
+// 事件生成器
+async fn generate_events(sender: mpsc::Sender<Event>) {
+    let mut counter = 0;
+    
+    loop {
+        counter += 1;
+        let timestamp = Instant::now();
+        
+        let event = match counter % 4 {
+            0 => Event::UserAction {
+                user_id: (counter % 5) as u64,
+                action: format!("Action_{}", counter),
+                timestamp,
+            },
+            1 => Event::SystemMetric {
+                metric_name: "CPU_Usage".to_string(),
+                value: 50.0 + (counter as f64 * 0.5) % 50.0,
+                timestamp,
+            },
+            2 => Event::SystemMetric {
+                metric_name: "Memory_Usage".to_string(),
+                value: 30.0 + (counter as f64 * 0.3) % 60.0,
+                timestamp,
+            },
+            _ => Event::ErrorEvent {
+                error_type: "NetworkError".to_string(),
+                message: format!("网络错误 #{}", counter),
+                timestamp,
+            },
+        };
+        
+        if sender.send(event).await.is_err() {
+            break;
+        }
+        
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        if counter >= 20 {
+            break;
+        }
+    }
+}
+
+async fn demo_complex_stream_processing() {
+    println!("=== Demo 2: 复杂数据流处理系统 ===");
+    
+    let (event_stream, event_sender) = EventStream::new();
+    let mut processor = StreamProcessor::new();
+    
+    // 启动事件生成器
+    let generator_handle = tokio::spawn(generate_events(event_sender));
+    
+    // 处理事件流
+    let processing_handle = tokio::spawn(async move {
+        event_stream
+            .for_each(|event| async {
+                processor.process_event(event);
+            })
+            .await;
+        
+        println!("{}", processor.get_summary());
+    });
+    
+    // 等待完成
+    tokio::join!(generator_handle, processing_handle);
 }
 ```
 
-### 自定义 Future 实现
+#### Demo 3: 高性能流式数据处理
+
+```rust
+use futures::stream::{Stream, StreamExt};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use std::collections::VecDeque;
+use tokio::sync::mpsc;
+
+// 高性能缓冲流
+struct BufferedStream<T> {
+    buffer: VecDeque<T>,
+    receiver: mpsc::Receiver<T>,
+    batch_size: usize,
+}
+
+impl<T> BufferedStream<T> {
+    fn new(receiver: mpsc::Receiver<T>, batch_size: usize) -> Self {
+        Self {
+            buffer: VecDeque::new(),
+            receiver,
+            batch_size,
+        }
+    }
+}
+
+impl<T> Stream for BufferedStream<T> {
+    type Item = Vec<T>;
+    
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<Option<Self::Item>> {
+        // 尝试填充缓冲区
+        while self.buffer.len() < self.batch_size {
+            match self.receiver.poll_recv(cx) {
+                Poll::Ready(Some(item)) => {
+                    self.buffer.push_back(item);
+                }
+                Poll::Ready(None) => {
+                    // 通道关闭，返回剩余数据
+                    if self.buffer.is_empty() {
+                        return Poll::Ready(None);
+                    } else {
+                        let batch = self.buffer.drain(..).collect();
+                        return Poll::Ready(Some(batch));
+                    }
+                }
+                Poll::Pending => {
+                    // 如果缓冲区有数据，则返回
+                    if !self.buffer.is_empty() {
+                        let batch = self.buffer.drain(..).collect();
+                        return Poll::Ready(Some(batch));
+                    }
+                    return Poll::Pending;
+                }
+            }
+        }
+        
+        // 缓冲区已满，返回批次
+        let batch = self.buffer.drain(..).collect();
+        Poll::Ready(Some(batch))
+    }
+}
+
+// 流式数据处理器
+struct StreamingProcessor {
+    processed_count: usize,
+    processing_time: Duration,
+    start_time: Instant,
+}
+
+impl StreamingProcessor {
+    fn new() -> Self {
+        Self {
+            processed_count: 0,
+            processing_time: Duration::new(0, 0),
+            start_time: Instant::now(),
+        }
+    }
+    
+    async fn process_batch(&mut self, batch: Vec<String>) -> Vec<String> {
+        let start = Instant::now();
+        
+        // 模拟批处理
+        let processed = batch
+            .into_iter()
+            .map(|item| {
+                // 模拟处理时间
+                std::thread::sleep(Duration::from_micros(10));
+                format!("Processed: {}", item)
+            })
+            .collect();
+        
+        self.processing_time += start.elapsed();
+        self.processed_count += 1;
+        
+        processed
+    }
+    
+    fn get_stats(&self) -> String {
+        let total_time = self.start_time.elapsed();
+        let throughput = self.processed_count as f64 / total_time.as_secs_f64();
+        
+        format!(
+            "统计信息: 处理了 {} 个批次, 总时间: {:?}, 吞吐量: {:.2} 批次/秒",
+            self.processed_count, total_time, throughput
+        )
+    }
+}
+
+// 流式数据生成器
+async fn generate_streaming_data(sender: mpsc::Sender<String>, count: usize) {
+    for i in 0..count {
+        let data = format!("Data_{:05}", i);
+        if sender.send(data).await.is_err() {
+            break;
+        }
+        
+        // 模拟数据生成间隔
+        if i % 100 == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+}
+
+// 流式数据聚合器
+struct StreamAggregator {
+    word_count: std::collections::HashMap<String, usize>,
+    total_items: usize,
+}
+
+impl StreamAggregator {
+    fn new() -> Self {
+        Self {
+            word_count: std::collections::HashMap::new(),
+            total_items: 0,
+        }
+    }
+    
+    fn aggregate_batch(&mut self, batch: Vec<String>) {
+        for item in batch {
+            self.total_items += 1;
+            
+            // 简单的词频统计
+            let words: Vec<&str> = item.split('_').collect();
+            for word in words {
+                *self.word_count.entry(word.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    
+    fn get_report(&self) -> String {
+        let mut sorted_words: Vec<_> = self.word_count.iter().collect();
+        sorted_words.sort_by(|a, b| b.1.cmp(a.1));
+        
+        let top_words = sorted_words
+            .iter()
+            .take(5)
+            .map(|(word, count)| format!("{}: {}", word, count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        format!(
+            "聚合报告: 总项目数: {}, 前5个词: [{}]",
+            self.total_items, top_words
+        )
+    }
+}
+
+async fn demo_high_performance_streaming() {
+    println!("=== Demo 3: 高性能流式数据处理 ===");
+    
+    let (sender, receiver) = mpsc::channel(1000);
+    let buffered_stream = BufferedStream::new(receiver, 50);
+    
+    let mut processor = StreamingProcessor::new();
+    let mut aggregator = StreamAggregator::new();
+    
+    // 启动数据生成器
+    let generator_handle = tokio::spawn(generate_streaming_data(sender, 1000));
+    
+    // 处理流式数据
+    let processing_handle = tokio::spawn(async move {
+        buffered_stream
+            .for_each(|batch| async {
+                let processed_batch = processor.process_batch(batch).await;
+                aggregator.aggregate_batch(processed_batch);
+            })
+            .await;
+        
+        println!("{}", processor.get_stats());
+        println!("{}", aggregator.get_report());
+    });
+    
+    // 等待完成
+    tokio::join!(generator_handle, processing_handle);
+}
+
+// 运行所有 Stream 示例
+async fn run_all_stream_demos() {
+    demo_stream_operations().await;
+    println!();
+    demo_complex_stream_processing().await;
+    println!();
+    demo_high_performance_streaming().await;
+}
+```
+
+### 自定义 Future 实现详解
+
+Future 是 Rust 异步编程的核心抽象，理解其内部机制对于编写高效异步代码至关重要。
+
+#### Demo 1: 基础 Future 实现与状态机
 
 ```rust
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 use std::thread;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
-// 自定义 Future：延时任务
-struct DelayFuture {
+// 简单的延时 Future
+struct SimpleFuture {
     when: Instant,
-    waker: Option<Waker>,
 }
 
-impl DelayFuture {
+impl SimpleFuture {
     fn new(delay: Duration) -> Self {
         Self {
             when: Instant::now() + delay,
-            waker: None,
         }
     }
 }
 
-impl Future for DelayFuture {
-    type Output = ();
+impl Future for SimpleFuture {
+    type Output = String;
     
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if Instant::now() >= self.when {
-            Poll::Ready(())
+            Poll::Ready("延时完成".to_string())
         } else {
-            // 保存 waker 以便稍后唤醒
-            self.waker = Some(cx.waker().clone());
-            
-            // 在后台线程中设置唤醒
+            // 设置唤醒器
             let waker = cx.waker().clone();
             let when = self.when;
+            
             thread::spawn(move || {
-                thread::sleep(when - Instant::now());
+                let now = Instant::now();
+                if when > now {
+                    thread::sleep(when - now);
+                }
                 waker.wake();
             });
             
@@ -7743,187 +9055,729 @@ impl Future for DelayFuture {
     }
 }
 
-// 使用自定义 Future
-async fn use_delay_future() {
-    println!("开始等待...");
-    DelayFuture::new(Duration::from_secs(2)).await;
-    println!("等待完成！");
-}
-```
-
-### 异步生命周期和借用
-
-```rust
-// 异步函数中的生命周期
-async fn process_data<'a>(data: &'a str) -> &'a str {
-    // 异步操作
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    data
+// 状态机 Future
+#[derive(Debug)]
+enum ComputationState {
+    Init,
+    Computing { progress: u32 },
+    Finalizing,
+    Done,
 }
 
-// 异步闭包和生命周期
-async fn with_async_closure() {
-    let data = String::from("Hello");
-    
-    // 异步闭包
-    let process = |s: &str| async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        s.to_uppercase()
-    };
-    
-    let result = process(&data).await;
-    println!("结果: {}", result);
+struct StateMachineFuture {
+    state: ComputationState,
+    result: Option<u64>,
+    waker: Option<Waker>,
 }
 
-// 处理异步函数中的借用问题
-async fn borrowing_in_async() {
-    let mut data = vec![1, 2, 3, 4, 5];
-    
-    // 错误的写法：跨越 await 点的借用
-    // let first = &data[0];
-    // some_async_operation().await;
-    // println!("First: {}", first); // 编译错误
-    
-    // 正确的写法：重新获取引用
-    let first = data[0];
-    some_async_operation().await;
-    println!("First: {}", first);
-    
-    // 或者使用 Arc 进行共享
-    let shared_data = Arc::new(data);
-    let shared_clone = shared_data.clone();
-    
-    tokio::spawn(async move {
-        println!("从其他任务访问: {:?}", shared_clone);
-    });
-}
-```
-
-### 异步执行器和任务调度
-
-```rust
-// 构建简单的异步执行器
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-struct SimpleExecutor {
-    tasks: Arc<Mutex<VecDeque<Box<dyn Future<Output = ()> + Send + 'static>>>>,
-}
-
-impl SimpleExecutor {
+impl StateMachineFuture {
     fn new() -> Self {
         Self {
-            tasks: Arc::new(Mutex::new(VecDeque::new())),
+            state: ComputationState::Init,
+            result: None,
+            waker: None,
         }
     }
+}
+
+impl Future for StateMachineFuture {
+    type Output = u64;
     
-    fn spawn<F>(&self, future: F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        self.tasks.lock().unwrap().push_back(Box::new(future));
-    }
-    
-    fn run(&self) {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
-            let mut tasks = self.tasks.lock().unwrap();
-            if tasks.is_empty() {
-                break;
-            }
-            
-            let mut task = tasks.pop_front().unwrap();
-            drop(tasks);
-            
-            // 创建一个简单的 waker
-            let waker = create_waker();
-            let mut context = Context::from_waker(&waker);
-            
-            match task.as_mut().poll(&mut context) {
-                Poll::Ready(()) => {
-                    // 任务完成
+            match self.state {
+                ComputationState::Init => {
+                    println!("开始计算...");
+                    self.state = ComputationState::Computing { progress: 0 };
+                    
+                    // 启动后台计算
+                    let waker = cx.waker().clone();
+                    self.waker = Some(waker.clone());
+                    
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(100));
+                        waker.wake();
+                    });
+                    
+                    return Poll::Pending;
                 }
-                Poll::Pending => {
-                    // 任务未完成，重新加入队列
-                    self.tasks.lock().unwrap().push_back(task);
+                ComputationState::Computing { progress } => {
+                    if progress < 100 {
+                        println!("计算进度: {}%", progress);
+                        self.state = ComputationState::Computing { progress: progress + 25 };
+                        
+                        let waker = cx.waker().clone();
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_millis(50));
+                            waker.wake();
+                        });
+                        
+                        return Poll::Pending;
+                    } else {
+                        println!("计算完成，开始最终处理...");
+                        self.state = ComputationState::Finalizing;
+                    }
+                }
+                ComputationState::Finalizing => {
+                    self.result = Some(42);
+                    self.state = ComputationState::Done;
+                    
+                    let waker = cx.waker().clone();
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(30));
+                        waker.wake();
+                    });
+                    
+                    return Poll::Pending;
+                }
+                ComputationState::Done => {
+                    println!("所有步骤完成！");
+                    return Poll::Ready(self.result.unwrap());
                 }
             }
         }
     }
 }
 
-// 简单的 waker 实现
-fn create_waker() -> Waker {
-    fn raw_waker() -> RawWaker {
-        RawWaker::new(std::ptr::null(), &VTABLE)
+// 组合 Future
+struct CombinedFuture {
+    future1: Option<SimpleFuture>,
+    future2: Option<StateMachineFuture>,
+    result1: Option<String>,
+    result2: Option<u64>,
+}
+
+impl CombinedFuture {
+    fn new() -> Self {
+        Self {
+            future1: Some(SimpleFuture::new(Duration::from_millis(200))),
+            future2: Some(StateMachineFuture::new()),
+            result1: None,
+            result2: None,
+        }
     }
+}
+
+impl Future for CombinedFuture {
+    type Output = (String, u64);
     
-    const VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |_| raw_waker(),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // 轮询第一个 Future
+        if let Some(mut f1) = self.future1.take() {
+            match Pin::new(&mut f1).poll(cx) {
+                Poll::Ready(result) => {
+                    self.result1 = Some(result);
+                }
+                Poll::Pending => {
+                    self.future1 = Some(f1);
+                }
+            }
+        }
+        
+        // 轮询第二个 Future
+        if let Some(mut f2) = self.future2.take() {
+            match Pin::new(&mut f2).poll(cx) {
+                Poll::Ready(result) => {
+                    self.result2 = Some(result);
+                }
+                Poll::Pending => {
+                    self.future2 = Some(f2);
+                }
+            }
+        }
+        
+        // 检查是否都完成
+        if let (Some(r1), Some(r2)) = (&self.result1, &self.result2) {
+            Poll::Ready((r1.clone(), *r2))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+async fn demo_basic_future_implementation() {
+    println!("=== Demo 1: 基础 Future 实现与状态机 ===");
     
-    unsafe { Waker::from_raw(raw_waker()) }
+    // 测试简单 Future
+    let simple_result = SimpleFuture::new(Duration::from_millis(100)).await;
+    println!("简单 Future 结果: {}", simple_result);
+    
+    // 测试状态机 Future
+    let state_result = StateMachineFuture::new().await;
+    println!("状态机 Future 结果: {}", state_result);
+    
+    // 测试组合 Future
+    let combined_result = CombinedFuture::new().await;
+    println!("组合 Future 结果: {:?}", combined_result);
 }
 ```
 
-### 异步错误处理和恢复
+#### Demo 2: 高级 Future 模式与异步资源管理
 
 ```rust
-use tokio::time::{timeout, Duration};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 
-// 异步操作的超时处理
-async fn with_timeout() -> Result<String, Box<dyn std::error::Error>> {
-    let result = timeout(
-        Duration::from_secs(5),
-        slow_operation()
-    ).await?;
-    
-    Ok(result?)
+// 资源管理 Future
+struct ResourceManager {
+    resources: Arc<Mutex<VecDeque<String>>>,
 }
 
-async fn slow_operation() -> Result<String, MyError> {
-    // 模拟慢操作
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    Ok("操作完成".to_string())
+impl ResourceManager {
+    fn new() -> Self {
+        let mut resources = VecDeque::new();
+        for i in 0..3 {
+            resources.push_back(format!("Resource_{}", i));
+        }
+        
+        Self {
+            resources: Arc::new(Mutex::new(resources)),
+        }
+    }
+    
+    fn acquire(&self) -> ResourceAcquisitionFuture {
+        ResourceAcquisitionFuture {
+            manager: self.resources.clone(),
+            waker: None,
+        }
+    }
+    
+    fn release(&self, resource: String) {
+        let mut resources = self.resources.lock().unwrap();
+        resources.push_back(resource);
+        println!("资源已释放: {}", resource);
+    }
 }
 
-// 异步操作的重试机制
-async fn retry_async_operation<F, T, E>(
-    operation: F,
-    max_attempts: usize,
-) -> Result<T, E>
-where
-    F: Fn() -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>>,
-    E: std::fmt::Debug,
-{
-    let mut attempts = 0;
+struct ResourceAcquisitionFuture {
+    manager: Arc<Mutex<VecDeque<String>>>,
+    waker: Option<Waker>,
+}
+
+impl Future for ResourceAcquisitionFuture {
+    type Output = Option<String>;
     
-    loop {
-        match operation().await {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                attempts += 1;
-                if attempts >= max_attempts {
-                    return Err(e);
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut resources = self.manager.lock().unwrap();
+        
+        if let Some(resource) = resources.pop_front() {
+            println!("获取资源: {}", resource);
+            Poll::Ready(Some(resource))
+        } else {
+            println!("资源不足，等待中...");
+            self.waker = Some(cx.waker().clone());
+            
+            // 模拟资源回收
+            let waker = cx.waker().clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                waker.wake();
+            });
+            
+            Poll::Pending
+        }
+    }
+}
+
+// 异步任务队列
+struct AsyncTaskQueue {
+    tasks: Arc<Mutex<VecDeque<Box<dyn FnOnce() -> String + Send>>>>,
+    workers: usize,
+}
+
+impl AsyncTaskQueue {
+    fn new(workers: usize) -> Self {
+        Self {
+            tasks: Arc::new(Mutex::new(VecDeque::new())),
+            workers,
+        }
+    }
+    
+    fn add_task<F>(&self, task: F) 
+    where
+        F: FnOnce() -> String + Send + 'static,
+    {
+        let mut tasks = self.tasks.lock().unwrap();
+        tasks.push_back(Box::new(task));
+    }
+    
+    fn process_tasks(&self) -> TaskProcessingFuture {
+        TaskProcessingFuture {
+            queue: self.tasks.clone(),
+            workers: self.workers,
+            completed: 0,
+            results: Vec::new(),
+        }
+    }
+}
+
+struct TaskProcessingFuture {
+    queue: Arc<Mutex<VecDeque<Box<dyn FnOnce() -> String + Send>>>>,
+    workers: usize,
+    completed: usize,
+    results: Vec<String>,
+}
+
+impl Future for TaskProcessingFuture {
+    type Output = Vec<String>;
+    
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut queue = self.queue.lock().unwrap();
+        
+        if queue.is_empty() {
+            return Poll::Ready(self.results.clone());
+        }
+        
+        // 处理任务
+        let task_count = std::cmp::min(self.workers, queue.len());
+        for _ in 0..task_count {
+            if let Some(task) = queue.pop_front() {
+                let result = task();
+                self.results.push(result);
+                self.completed += 1;
+            }
+        }
+        
+        if queue.is_empty() {
+            Poll::Ready(self.results.clone())
+        } else {
+            let waker = cx.waker().clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                waker.wake();
+            });
+            Poll::Pending
+        }
+    }
+}
+
+// 异步缓存系统
+struct AsyncCache {
+    cache: Arc<Mutex<std::collections::HashMap<String, String>>>,
+}
+
+impl AsyncCache {
+    fn new() -> Self {
+        Self {
+            cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+    
+    fn get(&self, key: &str) -> CacheGetFuture {
+        CacheGetFuture {
+            cache: self.cache.clone(),
+            key: key.to_string(),
+            state: CacheState::Checking,
+        }
+    }
+    
+    fn set(&self, key: String, value: String) {
+        let mut cache = self.cache.lock().unwrap();
+        cache.insert(key, value);
+    }
+}
+
+enum CacheState {
+    Checking,
+    Loading,
+    Done,
+}
+
+struct CacheGetFuture {
+    cache: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    key: String,
+    state: CacheState,
+}
+
+impl Future for CacheGetFuture {
+    type Output = String;
+    
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match self.state {
+                CacheState::Checking => {
+                    let cache = self.cache.lock().unwrap();
+                    if let Some(value) = cache.get(&self.key) {
+                        println!("缓存命中: {} = {}", self.key, value);
+                        return Poll::Ready(value.clone());
+                    } else {
+                        println!("缓存未命中: {}，开始加载...", self.key);
+                        self.state = CacheState::Loading;
+                        
+                        // 模拟异步加载
+                        let waker = cx.waker().clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            waker.wake();
+                        });
+                        
+                        return Poll::Pending;
+                    }
                 }
-                
-                println!("尝试 {} 失败: {:?}", attempts, e);
-                
-                // 指数退避
-                let delay = Duration::from_millis(100 * 2_u64.pow(attempts as u32));
-                tokio::time::sleep(delay).await;
+                CacheState::Loading => {
+                    // 模拟从数据源加载
+                    let value = format!("loaded_value_for_{}", self.key);
+                    
+                    {
+                        let mut cache = self.cache.lock().unwrap();
+                        cache.insert(self.key.clone(), value.clone());
+                    }
+                    
+                    println!("数据加载完成: {} = {}", self.key, value);
+                    self.state = CacheState::Done;
+                    return Poll::Ready(value);
+                }
+                CacheState::Done => {
+                    unreachable!("Future 已完成");
+                }
             }
         }
     }
+}
+
+async fn demo_advanced_future_patterns() {
+    println!("=== Demo 2: 高级 Future 模式与异步资源管理 ===");
+    
+    // 测试资源管理
+    println!("--- 资源管理测试 ---");
+    let resource_manager = ResourceManager::new();
+    
+    let resource1 = resource_manager.acquire().await;
+    let resource2 = resource_manager.acquire().await;
+    
+    if let Some(res) = resource1 {
+        println!("使用资源: {}", res);
+        resource_manager.release(res);
+    }
+    
+    // 测试任务队列
+    println!("\n--- 任务队列测试 ---");
+    let task_queue = AsyncTaskQueue::new(2);
+    
+    for i in 0..5 {
+        task_queue.add_task(move || {
+            format!("Task {} completed", i)
+        });
+    }
+    
+    let results = task_queue.process_tasks().await;
+    println!("任务队列结果: {:?}", results);
+    
+    // 测试异步缓存
+    println!("\n--- 异步缓存测试 ---");
+    let cache = AsyncCache::new();
+    
+    let value1 = cache.get("key1").await;
+    let value2 = cache.get("key1").await;  // 应该是缓存命中
+    
+    println!("缓存测试完成: {} -> {}", value1, value2);
+}
+```
+
+#### Demo 3: 复杂 Future 组合与错误处理
+
+```rust
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use std::error::Error;
+use std::fmt;
+
+// 自定义错误类型
+#[derive(Debug)]
+enum AsyncError {
+    Timeout,
+    NetworkError(String),
+    ProcessingError(String),
+}
+
+impl fmt::Display for AsyncError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AsyncError::Timeout => write!(f, "操作超时"),
+            AsyncError::NetworkError(msg) => write!(f, "网络错误: {}", msg),
+            AsyncError::ProcessingError(msg) => write!(f, "处理错误: {}", msg),
+        }
+    }
+}
+
+impl Error for AsyncError {}
+
+// 带超时的 Future
+struct TimeoutFuture<F> {
+    future: F,
+    timeout: Duration,
+    start: Instant,
+}
+
+impl<F> TimeoutFuture<F> {
+    fn new(future: F, timeout: Duration) -> Self {
+        Self {
+            future,
+            timeout,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl<F> Future for TimeoutFuture<F>
+where
+    F: Future + Unpin,
+{
+    type Output = Result<F::Output, AsyncError>;
+    
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // 检查是否超时
+        if self.start.elapsed() >= self.timeout {
+            return Poll::Ready(Err(AsyncError::Timeout));
+        }
+        
+        // 轮询内部 Future
+        match Pin::new(&mut self.future).poll(cx) {
+            Poll::Ready(output) => Poll::Ready(Ok(output)),
+            Poll::Pending => {
+                // 设置超时唤醒
+                let waker = cx.waker().clone();
+                let remaining = self.timeout - self.start.elapsed();
+                
+                tokio::spawn(async move {
+                    tokio::time::sleep(remaining).await;
+                    waker.wake();
+                });
+                
+                Poll::Pending
+            }
+        }
+    }
+}
+
+// 重试 Future
+struct RetryFuture<F, Fn> {
+    future_factory: Fn,
+    current_future: Option<F>,
+    max_attempts: usize,
+    current_attempt: usize,
+    delay: Duration,
+}
+
+impl<F, Fn> RetryFuture<F, Fn>
+where
+    F: Future,
+    Fn: FnMut() -> F,
+{
+    fn new(mut future_factory: Fn, max_attempts: usize, delay: Duration) -> Self {
+        let current_future = Some(future_factory());
+        Self {
+            future_factory,
+            current_future,
+            max_attempts,
+            current_attempt: 1,
+            delay,
+        }
+    }
+}
+
+impl<F, Fn> Future for RetryFuture<F, Fn>
+where
+    F: Future<Output = Result<String, AsyncError>> + Unpin,
+    Fn: FnMut() -> F + Unpin,
+{
+    type Output = Result<String, AsyncError>;
+    
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            if let Some(mut current) = self.current_future.take() {
+                match Pin::new(&mut current).poll(cx) {
+                    Poll::Ready(Ok(result)) => {
+                        return Poll::Ready(Ok(result));
+                    }
+                    Poll::Ready(Err(err)) => {
+                        if self.current_attempt >= self.max_attempts {
+                            return Poll::Ready(Err(err));
+                        }
+                        
+                        println!("尝试 {} 失败: {}，将重试...", self.current_attempt, err);
+                        self.current_attempt += 1;
+                        
+                        // 等待延迟后重试
+                        let waker = cx.waker().clone();
+                        let delay = self.delay;
+                        tokio::spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            waker.wake();
+                        });
+                        
+                        return Poll::Pending;
+                    }
+                    Poll::Pending => {
+                        self.current_future = Some(current);
+                        return Poll::Pending;
+                    }
+                }
+            } else {
+                // 创建新的 Future 实例
+                self.current_future = Some((self.future_factory)());
+            }
+        }
+    }
+}
+
+// 并发执行多个 Future
+struct ConcurrentFutures<F> {
+    futures: Vec<Option<F>>,
+    results: Vec<Option<Result<String, AsyncError>>>,
+    completed: usize,
+}
+
+impl<F> ConcurrentFutures<F> {
+    fn new(futures: Vec<F>) -> Self {
+        let len = futures.len();
+        Self {
+            futures: futures.into_iter().map(Some).collect(),
+            results: vec![None; len],
+            completed: 0,
+        }
+    }
+}
+
+impl<F> Future for ConcurrentFutures<F>
+where
+    F: Future<Output = Result<String, AsyncError>> + Unpin,
+{
+    type Output = Vec<Result<String, AsyncError>>;
+    
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        for (i, future_opt) in self.futures.iter_mut().enumerate() {
+            if let Some(mut future) = future_opt.take() {
+                match Pin::new(&mut future).poll(cx) {
+                    Poll::Ready(result) => {
+                        self.results[i] = Some(result);
+                        self.completed += 1;
+                    }
+                    Poll::Pending => {
+                        *future_opt = Some(future);
+                    }
+                }
+            }
+        }
+        
+        if self.completed == self.results.len() {
+            Poll::Ready(self.results.iter().map(|r| r.as_ref().unwrap().clone()).collect())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+// 模拟异步操作
+async fn simulate_async_operation(id: u32, success_rate: f64) -> Result<String, AsyncError> {
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    
+    if fastrand::f64() < success_rate {
+        Ok(format!("操作 {} 成功", id))
+    } else {
+        Err(AsyncError::ProcessingError(format!("操作 {} 失败", id)))
+    }
+}
+
+// 模拟网络请求
+async fn simulate_network_request(url: &str) -> Result<String, AsyncError> {
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    
+    if url.contains("error") {
+        Err(AsyncError::NetworkError("连接失败".to_string()))
+    } else {
+        Ok(format!("从 {} 获取数据成功", url))
+    }
+}
+
+async fn demo_complex_future_composition() {
+    println!("=== Demo 3: 复杂 Future 组合与错误处理 ===");
+    
+    // 测试超时 Future
+    println!("--- 超时测试 ---");
+    let timeout_future = TimeoutFuture::new(
+        simulate_async_operation(1, 1.0),
+        Duration::from_millis(150),
+    );
+    
+    match timeout_future.await {
+        Ok(result) => println!("超时测试成功: {}", result),
+        Err(err) => println!("超时测试失败: {}", err),
+    }
+    
+    // 测试重试 Future
+    println!("\n--- 重试测试 ---");
+    let retry_future = RetryFuture::new(
+        || simulate_async_operation(2, 0.3),
+        3,
+        Duration::from_millis(100),
+    );
+    
+    match retry_future.await {
+        Ok(result) => println!("重试测试成功: {}", result),
+        Err(err) => println!("重试测试失败: {}", err),
+    }
+    
+    // 测试并发 Future
+    println!("\n--- 并发测试 ---");
+    let concurrent_futures = vec![
+        simulate_async_operation(3, 0.8),
+        simulate_async_operation(4, 0.9),
+        simulate_async_operation(5, 0.7),
+    ];
+    
+    let concurrent = ConcurrentFutures::new(concurrent_futures);
+    let results = concurrent.await;
+    
+    for (i, result) in results.iter().enumerate() {
+        match result {
+            Ok(msg) => println!("并发任务 {}: {}", i, msg),
+            Err(err) => println!("并发任务 {} 失败: {}", i, err),
+        }
+    }
+    
+    // 测试复杂组合
+    println!("\n--- 复杂组合测试 ---");
+    let complex_future = async {
+        let network_result = TimeoutFuture::new(
+            simulate_network_request("https://api.example.com/data"),
+            Duration::from_millis(300),
+        ).await?;
+        
+        let processing_result = RetryFuture::new(
+            || simulate_async_operation(6, 0.6),
+            2,
+            Duration::from_millis(50),
+        ).await?;
+        
+        Ok::<String, AsyncError>(format!("组合结果: {} -> {}", network_result, processing_result))
+    };
+    
+    match complex_future.await {
+        Ok(result) => println!("复杂组合成功: {}", result),
+        Err(err) => println!("复杂组合失败: {}", err),
+    }
+}
+
+// 运行所有 Future 示例
+async fn run_all_future_demos() {
+    demo_basic_future_implementation().await;
+    println!();
+    demo_advanced_future_patterns().await;
+    println!();
+    demo_complex_future_composition().await;
 }
 ```
 
 ---
 
-## 5. 高级并发模式
+## 5. 高级并发模式详解
 
 ### 并发模型对比
 
@@ -7934,241 +9788,987 @@ where
 | **Node.js** | 单线程事件循环 | 避免了多线程复杂性 |
 | **Rust** | 多种模式支持 | 内存安全 + 数据竞争检测 |
 
-### 通道和消息传递
+Rust 的并发模型具有独特的优势：
+
+```mermaid
+graph TB
+    A["Rust 并发编程优势"] --> B["内存安全保证"]
+    A --> C["数据竞争防护"]
+    A --> D["零成本抽象"]
+    A --> E["丰富的并发原语"]
+    
+    B --> F["编译时借用检查"]
+    B --> G["生命周期管理"]
+    
+    C --> H["Send + Sync trait"]
+    C --> I["类型系统保证"]
+    
+    D --> J["无运行时开销"]
+    D --> K["编译时优化"]
+    
+    E --> L["通道、锁、原子操作"]
+    E --> M["Actor模式、无锁结构"]
+    
+    style A fill:#e3f2fd
+    style B fill:#f3e5f5
+    style C fill:#e8f5e8
+    style D fill:#fff3e0
+    style E fill:#fce4ec
+```
+
+### 通道和消息传递详解
+
+通道是 Rust 并发编程的核心机制，提供了安全的跨线程通信方式。不同类型的通道适用于不同的场景。
+
+#### Demo 1: 多类型通道系统与工作队列
 
 ```rust
-use tokio::sync::{mpsc, oneshot, broadcast};
+use tokio::sync::{mpsc, oneshot, broadcast, watch};
+use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-// 多生产者单消费者通道
-async fn mpsc_example() {
-    let (tx, mut rx) = mpsc::channel::<String>(32);
+// 任务类型定义
+#[derive(Debug, Clone)]
+enum TaskType {
+    Compute { data: Vec<i32>, result_sender: Option<oneshot::Sender<i32>> },
+    Network { url: String, result_sender: Option<oneshot::Sender<String>> },
+    Database { query: String, result_sender: Option<oneshot::Sender<Vec<String>>> },
+}
+
+// 工作节点状态
+#[derive(Debug, Clone)]
+enum WorkerStatus {
+    Idle,
+    Processing { task_id: u64, started_at: Instant },
+    Error { error: String },
+}
+
+// 系统事件
+#[derive(Debug, Clone)]
+enum SystemEvent {
+    WorkerStatusChanged { worker_id: u64, status: WorkerStatus },
+    TaskCompleted { task_id: u64, duration: Duration },
+    SystemShutdown,
+}
+
+// 工作队列管理器
+struct WorkQueueManager {
+    task_sender: mpsc::Sender<(u64, TaskType)>,
+    event_broadcaster: broadcast::Sender<SystemEvent>,
+    status_watcher: watch::Sender<HashMap<u64, WorkerStatus>>,
+    worker_count: usize,
+}
+
+impl WorkQueueManager {
+    fn new(worker_count: usize) -> Self {
+        let (task_sender, task_receiver) = mpsc::channel(100);
+        let (event_broadcaster, _) = broadcast::channel(50);
+        let (status_watcher, status_receiver) = watch::channel(HashMap::new());
+        
+        let manager = Self {
+            task_sender,
+            event_broadcaster,
+            status_watcher,
+            worker_count,
+        };
+        
+        // 启动工作线程
+        manager.start_workers(task_receiver, status_receiver);
+        
+        manager
+    }
     
-    // 多个生产者
-    for i in 0..3 {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            for j in 0..5 {
-                let msg = format!("Producer {} - Message {}", i, j);
-                tx.send(msg).await.unwrap();
+    fn start_workers(&self, mut task_receiver: mpsc::Receiver<(u64, TaskType)>, status_receiver: watch::Receiver<HashMap<u64, WorkerStatus>>) {
+        let event_sender = self.event_broadcaster.clone();
+        let status_sender = self.status_watcher.clone();
+        
+        for worker_id in 0..self.worker_count {
+            let mut task_rx = task_receiver;
+            let event_tx = event_sender.clone();
+            let status_tx = status_sender.clone();
+            
+            tokio::spawn(async move {
+                let mut current_status = WorkerStatus::Idle;
+                
+                loop {
+                    // 更新工作节点状态
+                    Self::update_worker_status(worker_id, current_status.clone(), &status_tx).await;
+                    
+                    // 等待任务
+                    match task_rx.recv().await {
+                        Some((task_id, task)) => {
+                            let start_time = Instant::now();
+                            current_status = WorkerStatus::Processing { task_id, started_at: start_time };
+                            
+                            // 发送状态变更事件
+                            let _ = event_tx.send(SystemEvent::WorkerStatusChanged {
+                                worker_id,
+                                status: current_status.clone(),
+                            });
+                            
+                            // 处理任务
+                            match Self::process_task(task).await {
+                                Ok(_) => {
+                                    let duration = start_time.elapsed();
+                                    println!("Worker {} completed task {} in {:?}", worker_id, task_id, duration);
+                                    
+                                    let _ = event_tx.send(SystemEvent::TaskCompleted { task_id, duration });
+                                }
+                                Err(e) => {
+                                    current_status = WorkerStatus::Error { error: e };
+                                    println!("Worker {} failed task {}: {}", worker_id, task_id, current_status);
+                                }
+                            }
+                            
+                            current_status = WorkerStatus::Idle;
+                        }
+                        None => {
+                            println!("Worker {} shutting down", worker_id);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    }
+    
+    async fn update_worker_status(worker_id: u64, status: WorkerStatus, status_sender: &watch::Sender<HashMap<u64, WorkerStatus>>) {
+        status_sender.send_modify(|statuses| {
+            statuses.insert(worker_id, status);
+        });
+    }
+    
+    async fn process_task(task: TaskType) -> Result<(), String> {
+        match task {
+            TaskType::Compute { data, result_sender } => {
+                // 模拟计算任务
                 tokio::time::sleep(Duration::from_millis(100)).await;
+                let result = data.iter().sum();
+                
+                if let Some(sender) = result_sender {
+                    let _ = sender.send(result);
+                }
+                Ok(())
             }
-        });
+            TaskType::Network { url, result_sender } => {
+                // 模拟网络请求
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                
+                if url.contains("error") {
+                    return Err("Network error".to_string());
+                }
+                
+                let result = format!("Data from {}", url);
+                if let Some(sender) = result_sender {
+                    let _ = sender.send(result);
+                }
+                Ok(())
+            }
+            TaskType::Database { query, result_sender } => {
+                // 模拟数据库查询
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                
+                let result = vec![format!("Result for: {}", query)];
+                if let Some(sender) = result_sender {
+                    let _ = sender.send(result);
+                }
+                Ok(())
+            }
+        }
     }
     
-    drop(tx); // 关闭发送端
+    async fn submit_task(&self, task_id: u64, task: TaskType) -> Result<(), String> {
+        self.task_sender.send((task_id, task)).await
+            .map_err(|_| "Failed to submit task".to_string())
+    }
     
-    // 单个消费者
-    let consumer = tokio::spawn(async move {
-        let mut messages = Vec::new();
-        while let Some(msg) = rx.recv().await {
-            messages.push(msg);
-            println!("Received: {}", messages.last().unwrap());
-        }
-        messages
-    });
+    fn subscribe_events(&self) -> broadcast::Receiver<SystemEvent> {
+        self.event_broadcaster.subscribe()
+    }
     
-    let all_messages = consumer.await.unwrap();
-    println!("Total messages: {}", all_messages.len());
+    fn watch_status(&self) -> watch::Receiver<HashMap<u64, WorkerStatus>> {
+        self.status_watcher.subscribe()
+    }
 }
 
-// 一次性通道 (oneshot)
-async fn oneshot_example() {
-    let (tx, rx) = oneshot::channel::<String>();
-    
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        tx.send("Hello from async task!".to_string()).unwrap();
-    });
-    
-    let result = rx.await.unwrap();
-    println!("Received: {}", result);
+// 任务提交客户端
+struct TaskClient {
+    manager: Arc<WorkQueueManager>,
+    task_counter: std::sync::atomic::AtomicU64,
 }
 
-// 广播通道
-async fn broadcast_example() {
-    let (tx, mut rx1) = broadcast::channel::<String>(16);
-    let mut rx2 = tx.subscribe();
-    let mut rx3 = tx.subscribe();
+impl TaskClient {
+    fn new(manager: Arc<WorkQueueManager>) -> Self {
+        Self {
+            manager,
+            task_counter: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
     
-    // 发送者
-    tokio::spawn(async move {
-        for i in 0..5 {
-            let msg = format!("Broadcast message {}", i);
-            tx.send(msg).unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+    async fn submit_compute_task(&self, data: Vec<i32>) -> Result<i32, String> {
+        let task_id = self.task_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (result_sender, result_receiver) = oneshot::channel();
+        
+        let task = TaskType::Compute {
+            data,
+            result_sender: Some(result_sender),
+        };
+        
+        self.manager.submit_task(task_id, task).await?;
+        result_receiver.await.map_err(|_| "Task failed".to_string())
+    }
+    
+    async fn submit_network_task(&self, url: String) -> Result<String, String> {
+        let task_id = self.task_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (result_sender, result_receiver) = oneshot::channel();
+        
+        let task = TaskType::Network {
+            url,
+            result_sender: Some(result_sender),
+        };
+        
+        self.manager.submit_task(task_id, task).await?;
+        result_receiver.await.map_err(|_| "Task failed".to_string())
+    }
+}
+
+async fn demo_multi_channel_work_queue() {
+    println!("=== Demo 1: 多类型通道系统与工作队列 ===");
+    
+    let manager = Arc::new(WorkQueueManager::new(3));
+    let client = TaskClient::new(manager.clone());
+    
+    // 启动事件监听器
+    let mut event_receiver = manager.subscribe_events();
+    let event_monitor = tokio::spawn(async move {
+        while let Ok(event) = event_receiver.recv().await {
+            println!("Event: {:?}", event);
         }
     });
     
-    // 多个接收者
-    let receiver1 = tokio::spawn(async move {
-        while let Ok(msg) = rx1.recv().await {
-            println!("Receiver 1: {}", msg);
+    // 启动状态监听器
+    let mut status_receiver = manager.watch_status();
+    let status_monitor = tokio::spawn(async move {
+        while status_receiver.changed().await.is_ok() {
+            let statuses = status_receiver.borrow().clone();
+            println!("Worker statuses: {:?}", statuses);
+            
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     });
     
-    let receiver2 = tokio::spawn(async move {
-        while let Ok(msg) = rx2.recv().await {
-            println!("Receiver 2: {}", msg);
-        }
-    });
+    // 提交一些任务
+    let mut handles = Vec::new();
     
-    tokio::join!(receiver1, receiver2);
+    for i in 0..5 {
+        let client = client.clone();
+        let handle = tokio::spawn(async move {
+            let data = vec![i, i + 1, i + 2];
+            match client.submit_compute_task(data).await {
+                Ok(result) => println!("Compute task {} result: {}", i, result),
+                Err(e) => println!("Compute task {} failed: {}", i, e),
+            }
+        });
+        handles.push(handle);
+    }
+    
+    for i in 0..3 {
+        let client = client.clone();
+        let handle = tokio::spawn(async move {
+            let url = format!("https://api.example.com/data/{}", i);
+            match client.submit_network_task(url).await {
+                Ok(result) => println!("Network task {} result: {}", i, result),
+                Err(e) => println!("Network task {} failed: {}", i, e),
+            }
+        });
+        handles.push(handle);
+    }
+    
+    // 等待所有任务完成
+    for handle in handles {
+        let _ = handle.await;
+    }
+    
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    
+    // 清理
+    drop(manager);
+    let _ = tokio::join!(event_monitor, status_monitor);
 }
 ```
 
-### Actor 模式实现
+#### Demo 2: 高性能消息路由系统
 
 ```rust
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use std::hash::{Hash, Hasher};
 
-// Actor 特质
-trait Actor {
-    type Message;
-    
-    async fn handle_message(&mut self, msg: Self::Message);
+// 消息类型
+#[derive(Debug, Clone)]
+struct Message {
+    id: u64,
+    topic: String,
+    payload: Vec<u8>,
+    timestamp: Instant,
+    priority: MessagePriority,
 }
 
-// 计数器 Actor
-struct Counter {
-    count: usize,
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+enum MessagePriority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+    Critical = 3,
 }
 
-enum CounterMessage {
-    Increment,
-    Decrement,
-    GetCount(oneshot::Sender<usize>),
-    Reset,
+// 订阅者信息
+#[derive(Debug)]
+struct Subscriber {
+    id: u64,
+    topics: Vec<String>,
+    sender: mpsc::Sender<Message>,
+    message_count: std::sync::atomic::AtomicU64,
+    last_message_time: Arc<RwLock<Option<Instant>>>,
 }
 
-impl Counter {
+// 消息路由器
+struct MessageRouter {
+    subscribers: Arc<RwLock<HashMap<u64, Arc<Subscriber>>>>,
+    topic_index: Arc<RwLock<HashMap<String, Vec<u64>>>>,
+    message_buffer: Arc<RwLock<std::collections::BinaryHeap<PriorityMessage>>>,
+    stats: Arc<RouteStats>,
+}
+
+#[derive(Debug)]
+struct RouteStats {
+    total_messages: std::sync::atomic::AtomicU64,
+    total_deliveries: std::sync::atomic::AtomicU64,
+    failed_deliveries: std::sync::atomic::AtomicU64,
+    average_latency: Arc<RwLock<Duration>>,
+}
+
+// 优先级消息包装器
+#[derive(Debug)]
+struct PriorityMessage {
+    message: Message,
+    subscribers: Vec<u64>,
+}
+
+impl PartialEq for PriorityMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.message.priority == other.message.priority
+    }
+}
+
+impl Eq for PriorityMessage {}
+
+impl PartialOrd for PriorityMessage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PriorityMessage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.message.priority.partial_cmp(&other.message.priority).unwrap()
+    }
+}
+
+impl MessageRouter {
     fn new() -> Self {
-        Self { count: 0 }
+        let router = Self {
+            subscribers: Arc::new(RwLock::new(HashMap::new())),
+            topic_index: Arc::new(RwLock::new(HashMap::new())),
+            message_buffer: Arc::new(RwLock::new(std::collections::BinaryHeap::new())),
+            stats: Arc::new(RouteStats {
+                total_messages: std::sync::atomic::AtomicU64::new(0),
+                total_deliveries: std::sync::atomic::AtomicU64::new(0),
+                failed_deliveries: std::sync::atomic::AtomicU64::new(0),
+                average_latency: Arc::new(RwLock::new(Duration::from_millis(0))),
+            }),
+        };
+        
+        // 启动消息处理器
+        router.start_message_processor();
+        
+        router
     }
-}
-
-impl Actor for Counter {
-    type Message = CounterMessage;
     
-    async fn handle_message(&mut self, msg: Self::Message) {
-        match msg {
-            CounterMessage::Increment => {
-                self.count += 1;
-                println!("Counter incremented to {}", self.count);
-            }
-            CounterMessage::Decrement => {
-                if self.count > 0 {
-                    self.count -= 1;
-                }
-                println!("Counter decremented to {}", self.count);
-            }
-            CounterMessage::GetCount(reply) => {
-                let _ = reply.send(self.count);
-            }
-            CounterMessage::Reset => {
-                self.count = 0;
-                println!("Counter reset to 0");
-            }
-        }
-    }
-}
-
-// Actor 系统
-struct ActorSystem<A: Actor> {
-    tx: mpsc::Sender<A::Message>,
-}
-
-impl<A: Actor + Send + 'static> ActorSystem<A> 
-where
-    A::Message: Send + 'static,
-{
-    fn new(mut actor: A) -> Self {
-        let (tx, mut rx) = mpsc::channel::<A::Message>(32);
+    fn start_message_processor(&self) {
+        let buffer = self.message_buffer.clone();
+        let subscribers = self.subscribers.clone();
+        let stats = self.stats.clone();
         
         tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                actor.handle_message(msg).await;
+            loop {
+                let priority_message = {
+                    let mut buffer_guard = buffer.write().await;
+                    buffer_guard.pop()
+                };
+                
+                if let Some(priority_msg) = priority_message {
+                    let start_time = Instant::now();
+                    let mut successful_deliveries = 0;
+                    let mut failed_deliveries = 0;
+                    
+                    let subscribers_guard = subscribers.read().await;
+                    for subscriber_id in &priority_msg.subscribers {
+                        if let Some(subscriber) = subscribers_guard.get(subscriber_id) {
+                            match subscriber.sender.try_send(priority_msg.message.clone()) {
+                                Ok(_) => {
+                                    subscriber.message_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    *subscriber.last_message_time.write().await = Some(Instant::now());
+                                    successful_deliveries += 1;
+                                }
+                                Err(_) => {
+                                    failed_deliveries += 1;
+                                    println!("Failed to deliver message to subscriber {}", subscriber_id);
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 更新统计信息
+                    stats.total_deliveries.fetch_add(successful_deliveries, std::sync::atomic::Ordering::Relaxed);
+                    stats.failed_deliveries.fetch_add(failed_deliveries, std::sync::atomic::Ordering::Relaxed);
+                    
+                    let delivery_latency = start_time.elapsed();
+                    *stats.average_latency.write().await = delivery_latency;
+                    
+                    println!("Delivered message {} to {} subscribers (priority: {:?})", 
+                        priority_msg.message.id, successful_deliveries, priority_msg.message.priority);
+                } else {
+                    // 没有消息时短暂休息
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
             }
         });
-        
-        Self { tx }
     }
     
-    async fn send_message(&self, msg: A::Message) -> Result<(), mpsc::error::SendError<A::Message>> {
-        self.tx.send(msg).await
+    async fn subscribe(&self, topics: Vec<String>, buffer_size: usize) -> (u64, mpsc::Receiver<Message>) {
+        let subscriber_id = fastrand::u64(..);
+        let (sender, receiver) = mpsc::channel(buffer_size);
+        
+        let subscriber = Arc::new(Subscriber {
+            id: subscriber_id,
+            topics: topics.clone(),
+            sender,
+            message_count: std::sync::atomic::AtomicU64::new(0),
+            last_message_time: Arc::new(RwLock::new(None)),
+        });
+        
+        // 添加订阅者
+        self.subscribers.write().await.insert(subscriber_id, subscriber);
+        
+        // 更新主题索引
+        let mut topic_index = self.topic_index.write().await;
+        for topic in topics {
+            topic_index.entry(topic).or_insert_with(Vec::new).push(subscriber_id);
+        }
+        
+        println!("Subscriber {} registered", subscriber_id);
+        (subscriber_id, receiver)
+    }
+    
+    async fn publish(&self, topic: String, payload: Vec<u8>, priority: MessagePriority) {
+        let message_id = fastrand::u64(..);
+        let message = Message {
+            id: message_id,
+            topic: topic.clone(),
+            payload,
+            timestamp: Instant::now(),
+            priority,
+        };
+        
+        // 查找订阅者
+        let topic_index = self.topic_index.read().await;
+        let subscribers = topic_index.get(&topic).cloned().unwrap_or_default();
+        
+        if !subscribers.is_empty() {
+            let priority_message = PriorityMessage {
+                message,
+                subscribers,
+            };
+            
+            // 添加到优先级队列
+            self.message_buffer.write().await.push(priority_message);
+            self.stats.total_messages.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            
+            println!("Published message {} to topic '{}' (priority: {:?})", message_id, topic, priority);
+        } else {
+            println!("No subscribers for topic '{}'", topic);
+        }
+    }
+    
+    async fn unsubscribe(&self, subscriber_id: u64) {
+        if let Some(subscriber) = self.subscribers.write().await.remove(&subscriber_id) {
+            // 从主题索引中移除
+            let mut topic_index = self.topic_index.write().await;
+            for topic in &subscriber.topics {
+                if let Some(subscribers) = topic_index.get_mut(topic) {
+                    subscribers.retain(|&id| id != subscriber_id);
+                    if subscribers.is_empty() {
+                        topic_index.remove(topic);
+                    }
+                }
+            }
+            
+            println!("Subscriber {} unsubscribed", subscriber_id);
+        }
+    }
+    
+    async fn get_stats(&self) -> (u64, u64, u64, Duration) {
+        let total_messages = self.stats.total_messages.load(std::sync::atomic::Ordering::Relaxed);
+        let total_deliveries = self.stats.total_deliveries.load(std::sync::atomic::Ordering::Relaxed);
+        let failed_deliveries = self.stats.failed_deliveries.load(std::sync::atomic::Ordering::Relaxed);
+        let avg_latency = *self.stats.average_latency.read().await;
+        
+        (total_messages, total_deliveries, failed_deliveries, avg_latency)
+    }
+}
+
+async fn demo_message_routing_system() {
+    println!("=== Demo 2: 高性能消息路由系统 ===");
+    
+    let router = Arc::new(MessageRouter::new());
+    
+    // 创建订阅者
+    let (sub1_id, mut sub1_rx) = router.subscribe(vec!["news".to_string(), "alerts".to_string()], 10).await;
+    let (sub2_id, mut sub2_rx) = router.subscribe(vec!["news".to_string()], 10).await;
+    let (sub3_id, mut sub3_rx) = router.subscribe(vec!["alerts".to_string(), "critical".to_string()], 5).await;
+    
+    // 启动订阅者处理器
+    let router_clone = router.clone();
+    let subscriber_handles = vec![
+        tokio::spawn(async move {
+            let mut count = 0;
+            while let Some(message) = sub1_rx.recv().await {
+                count += 1;
+                println!("Subscriber 1 received message {}: {} bytes", message.id, message.payload.len());
+                if count >= 10 { break; }
+            }
+        }),
+        tokio::spawn(async move {
+            let mut count = 0;
+            while let Some(message) = sub2_rx.recv().await {
+                count += 1;
+                println!("Subscriber 2 received message {}: {} bytes", message.id, message.payload.len());
+                if count >= 10 { break; }
+            }
+        }),
+        tokio::spawn(async move {
+            let mut count = 0;
+            while let Some(message) = sub3_rx.recv().await {
+                count += 1;
+                println!("Subscriber 3 received message {}: {} bytes (priority: {:?})", 
+                    message.id, message.payload.len(), message.priority);
+                if count >= 10 { break; }
+            }
+        }),
+    ];
+    
+    // 发布消息
+    let publisher_router = router.clone();
+    let publisher_handle = tokio::spawn(async move {
+        for i in 0..15 {
+            let topic = match i % 3 {
+                0 => "news",
+                1 => "alerts", 
+                _ => "critical",
+            };
+            
+            let priority = match i % 4 {
+                0 => MessagePriority::Low,
+                1 => MessagePriority::Normal,
+                2 => MessagePriority::High,
+                _ => MessagePriority::Critical,
+            };
+            
+            let payload = format!("Message content {}", i).into_bytes();
+            publisher_router.publish(topic.to_string(), payload, priority).await;
+            
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    
+    // 等待发布完成
+    publisher_handle.await.unwrap();
+    
+    // 等待一段时间让消息处理完成
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    // 获取统计信息
+    let (total_msgs, total_deliveries, failed_deliveries, avg_latency) = router.get_stats().await;
+    println!("Router stats: {} messages, {} deliveries, {} failures, avg latency: {:?}", 
+        total_msgs, total_deliveries, failed_deliveries, avg_latency);
+    
+    // 清理订阅者
+    router.unsubscribe(sub1_id).await;
+    router.unsubscribe(sub2_id).await;
+    router.unsubscribe(sub3_id).await;
+    
+    // 等待订阅者处理器完成
+    for handle in subscriber_handles {
+        let _ = handle.await;
     }
 }
 ```
 
-### 无锁数据结构
+#### Demo 3: 流式数据处理管道
 
 ```rust
-use std::sync::atomic::{AtomicUsize, AtomicPtr, Ordering};
-use std::ptr;
+use tokio::sync::{mpsc, broadcast};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use std::collections::VecDeque;
 
-// 无锁栈
-struct LockFreeStack<T> {
-    head: AtomicPtr<Node<T>>,
+// 数据项定义
+#[derive(Debug, Clone)]
+struct DataItem {
+    id: u64,
+    timestamp: Instant,
+    data: Vec<f64>,
+    metadata: std::collections::HashMap<String, String>,
 }
 
-struct Node<T> {
-    data: T,
-    next: *mut Node<T>,
+// 处理阶段结果
+#[derive(Debug, Clone)]
+struct ProcessingResult {
+    original_id: u64,
+    stage: String,
+    processed_data: Vec<f64>,
+    processing_time: Duration,
+    success: bool,
+    error_message: Option<String>,
 }
 
-impl<T> LockFreeStack<T> {
-    fn new() -> Self {
-        Self {
-            head: AtomicPtr::new(ptr::null_mut()),
-        }
+// 处理阶段特质
+trait ProcessingStage: Send + Sync {
+    fn name(&self) -> &str;
+    async fn process(&self, item: DataItem) -> ProcessingResult;
+}
+
+// 数据验证阶段
+struct ValidationStage;
+
+impl ProcessingStage for ValidationStage {
+    fn name(&self) -> &str {
+        "validation"
     }
     
-    fn push(&self, data: T) {
-        let new_node = Box::into_raw(Box::new(Node {
-            data,
-            next: ptr::null_mut(),
-        }));
+    async fn process(&self, item: DataItem) -> ProcessingResult {
+        let start = Instant::now();
         
-        loop {
-            let current_head = self.head.load(Ordering::Acquire);
-            unsafe {
-                (*new_node).next = current_head;
-            }
-            
-            match self.head.compare_exchange_weak(
-                current_head,
-                new_node,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(_) => continue,
-            }
+        // 模拟验证逻辑
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        
+        let success = !item.data.is_empty() && item.data.iter().all(|&x| x.is_finite());
+        
+        ProcessingResult {
+            original_id: item.id,
+            stage: self.name().to_string(),
+            processed_data: item.data,
+            processing_time: start.elapsed(),
+            success,
+            error_message: if success { None } else { Some("Invalid data".to_string()) },
         }
+    }
+}
+
+// 数据转换阶段
+struct TransformationStage;
+
+impl ProcessingStage for TransformationStage {
+    fn name(&self) -> &str {
+        "transformation"
     }
     
-    fn pop(&self) -> Option<T> {
-        loop {
-            let current_head = self.head.load(Ordering::Acquire);
-            if current_head.is_null() {
-                return None;
-            }
-            
-            let next = unsafe { (*current_head).next };
-            
-            match self.head.compare_exchange_weak(
-                current_head,
-                next,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    let data = unsafe { Box::from_raw(current_head) }.data;
-                    return Some(data);
-                }
-                Err(_) => continue,
-            }
+    async fn process(&self, item: DataItem) -> ProcessingResult {
+        let start = Instant::now();
+        
+        // 模拟数据转换
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        
+        let processed_data: Vec<f64> = item.data.iter()
+            .map(|&x| x * 2.0 + 1.0) // 简单的线性转换
+            .collect();
+        
+        ProcessingResult {
+            original_id: item.id,
+            stage: self.name().to_string(),
+            processed_data,
+            processing_time: start.elapsed(),
+            success: true,
+            error_message: None,
         }
     }
+}
+
+// 数据聚合阶段
+struct AggregationStage {
+    window_size: usize,
+    buffer: Arc<tokio::sync::Mutex<VecDeque<DataItem>>>,
+}
+
+impl AggregationStage {
+    fn new(window_size: usize) -> Self {
+        Self {
+            window_size,
+            buffer: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
+        }
+    }
+}
+
+impl ProcessingStage for AggregationStage {
+    fn name(&self) -> &str {
+        "aggregation"
+    }
+    
+    async fn process(&self, item: DataItem) -> ProcessingResult {
+        let start = Instant::now();
+        
+        let mut buffer = self.buffer.lock().await;
+        buffer.push_back(item.clone());
+        
+        if buffer.len() > self.window_size {
+            buffer.pop_front();
+        }
+        
+        // 计算滑动窗口聚合
+        let sum: f64 = buffer.iter()
+            .flat_map(|item| &item.data)
+            .sum();
+        let count = buffer.iter().map(|item| item.data.len()).sum::<usize>();
+        let average = if count > 0 { sum / count as f64 } else { 0.0 };
+        
+        ProcessingResult {
+            original_id: item.id,
+            stage: self.name().to_string(),
+            processed_data: vec![average, sum, count as f64],
+            processing_time: start.elapsed(),
+            success: true,
+            error_message: None,
+        }
+    }
+}
+
+// 流式处理管道
+struct ProcessingPipeline {
+    stages: Vec<Box<dyn ProcessingStage>>,
+    result_broadcaster: broadcast::Sender<ProcessingResult>,
+    error_sender: mpsc::Sender<(u64, String)>,
+    stats: Arc<PipelineStats>,
+}
+
+#[derive(Debug)]
+struct PipelineStats {
+    total_items: std::sync::atomic::AtomicU64,
+    successful_items: std::sync::atomic::AtomicU64,
+    failed_items: std::sync::atomic::AtomicU64,
+    total_processing_time: Arc<tokio::sync::Mutex<Duration>>,
+    stage_times: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Duration>>>,
+}
+
+impl ProcessingPipeline {
+    fn new() -> Self {
+        let (result_broadcaster, _) = broadcast::channel(100);
+        let (error_sender, error_receiver) = mpsc::channel(50);
+        
+        let pipeline = Self {
+            stages: Vec::new(),
+            result_broadcaster,
+            error_sender,
+            stats: Arc::new(PipelineStats {
+                total_items: std::sync::atomic::AtomicU64::new(0),
+                successful_items: std::sync::atomic::AtomicU64::new(0),
+                failed_items: std::sync::atomic::AtomicU64::new(0),
+                total_processing_time: Arc::new(tokio::sync::Mutex::new(Duration::new(0, 0))),
+                stage_times: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            }),
+        };
+        
+        // 启动错误处理器
+        pipeline.start_error_handler(error_receiver);
+        
+        pipeline
+    }
+    
+    fn add_stage(mut self, stage: Box<dyn ProcessingStage>) -> Self {
+        self.stages.push(stage);
+        self
+    }
+    
+    fn start_error_handler(&self, mut error_receiver: mpsc::Receiver<(u64, String)>) {
+        tokio::spawn(async move {
+            while let Some((item_id, error)) = error_receiver.recv().await {
+                println!("Processing error for item {}: {}", item_id, error);
+            }
+        });
+    }
+    
+    async fn process_item(&self, mut item: DataItem) -> Result<(), String> {
+        let overall_start = Instant::now();
+        
+        self.stats.total_items.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        
+        for stage in &self.stages {
+            let result = stage.process(item.clone()).await;
+            
+            // 更新阶段统计
+            {
+                let mut stage_times = self.stats.stage_times.lock().await;
+                let stage_time = stage_times.entry(result.stage.clone()).or_insert(Duration::new(0, 0));
+                *stage_time += result.processing_time;
+            }
+            
+            // 广播结果
+            let _ = self.result_broadcaster.send(result.clone());
+            
+            if !result.success {
+                let error_msg = result.error_message.unwrap_or("Unknown error".to_string());
+                let _ = self.error_sender.send((item.id, error_msg.clone())).await;
+                self.stats.failed_items.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(error_msg);
+            }
+            
+            // 更新数据项以传递到下一个阶段
+            item.data = result.processed_data;
+        }
+        
+        // 更新总体统计
+        let total_time = overall_start.elapsed();
+        {
+            let mut total_processing_time = self.stats.total_processing_time.lock().await;
+            *total_processing_time += total_time;
+        }
+        
+        self.stats.successful_items.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    
+    fn subscribe_results(&self) -> broadcast::Receiver<ProcessingResult> {
+        self.result_broadcaster.subscribe()
+    }
+    
+    async fn get_stats(&self) -> (u64, u64, u64, Duration, std::collections::HashMap<String, Duration>) {
+        let total = self.stats.total_items.load(std::sync::atomic::Ordering::Relaxed);
+        let successful = self.stats.successful_items.load(std::sync::atomic::Ordering::Relaxed);
+        let failed = self.stats.failed_items.load(std::sync::atomic::Ordering::Relaxed);
+        let total_time = *self.stats.total_processing_time.lock().await;
+        let stage_times = self.stats.stage_times.lock().await.clone();
+        
+        (total, successful, failed, total_time, stage_times)
+    }
+}
+
+// 数据生成器
+async fn generate_data_items(sender: mpsc::Sender<DataItem>, count: usize) {
+    for i in 0..count {
+        let item = DataItem {
+            id: i as u64,
+            timestamp: Instant::now(),
+            data: (0..5).map(|_| fastrand::f64() * 100.0).collect(),
+            metadata: {
+                let mut meta = std::collections::HashMap::new();
+                meta.insert("source".to_string(), "generator".to_string());
+                meta.insert("batch".to_string(), (i / 10).to_string());
+                meta
+            },
+        };
+        
+        if sender.send(item).await.is_err() {
+            break;
+        }
+        
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn demo_streaming_pipeline() {
+    println!("=== Demo 3: 流式数据处理管道 ===");
+    
+    // 构建处理管道
+    let pipeline = Arc::new(
+        ProcessingPipeline::new()
+            .add_stage(Box::new(ValidationStage))
+            .add_stage(Box::new(TransformationStage))
+            .add_stage(Box::new(AggregationStage::new(5)))
+    );
+    
+    // 订阅处理结果
+    let mut result_receiver = pipeline.subscribe_results();
+    let result_monitor = tokio::spawn(async move {
+        let mut stage_counts = std::collections::HashMap::new();
+        
+        while let Ok(result) = result_receiver.recv().await {
+            let count = stage_counts.entry(result.stage.clone()).or_insert(0);
+            *count += 1;
+            
+            if result.success {
+                println!("Stage '{}' completed for item {} ({}ms)", 
+                    result.stage, result.original_id, result.processing_time.as_millis());
+            } else {
+                println!("Stage '{}' failed for item {}: {}", 
+                    result.stage, result.original_id, 
+                    result.error_message.unwrap_or("Unknown error".to_string()));
+            }
+        }
+        
+        println!("Stage completion counts: {:?}", stage_counts);
+    });
+    
+    // 创建数据生成器
+    let (data_sender, mut data_receiver) = mpsc::channel(50);
+    let generator_handle = tokio::spawn(generate_data_items(data_sender, 20));
+    
+    // 启动数据处理器
+    let pipeline_clone = pipeline.clone();
+    let processor_handle = tokio::spawn(async move {
+        while let Some(item) = data_receiver.recv().await {
+            if let Err(e) = pipeline_clone.process_item(item).await {
+                println!("Failed to process item: {}", e);
+            }
+        }
+    });
+    
+    // 等待生成器完成
+    generator_handle.await.unwrap();
+    
+    // 等待一段时间让所有数据处理完成
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    
+    // 获取统计信息
+    let (total, successful, failed, total_time, stage_times) = pipeline.get_stats().await;
+    println!("\nPipeline Statistics:");
+    println!("Total items: {}", total);
+    println!("Successful: {}", successful);
+    println!("Failed: {}", failed);
+    println!("Total processing time: {:?}", total_time);
+    println!("Stage times: {:?}", stage_times);
+    
+    // 计算平均处理时间
+    if total > 0 {
+        let avg_time = total_time / total as u32;
+        println!("Average processing time per item: {:?}", avg_time);
+    }
+    
+    // 清理
+    drop(pipeline);
+    let _ = result_monitor.await;
+    let _ = processor_handle.await;
+}
+
+// 运行所有通道演示
+async fn run_all_channel_demos() {
+    demo_multi_channel_work_queue().await;
+    println!();
+    demo_message_routing_system().await;
+    println!();
+    demo_streaming_pipeline().await;
 }
 ```
 
