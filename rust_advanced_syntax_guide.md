@@ -352,21 +352,21 @@ where
 ```mermaid
 graph TB
     A["问题：普通生命周期约束不够用"] --> B["想要：接受任何字符串处理函数"]
-    B --> C["函数签名：F: Fn(&str) -> &str"]
+    B --> C["函数签名：F: Fn(&amp;str) -&gt; &amp;str"]
     
     C --> D["编译器的困惑"]
-    D --> E["这个 &str 的生命周期是什么？"]
+    D --> E["这个 &amp;str 的生命周期是什么？"]
     E --> F["是调用者决定的生命周期"]
     F --> G["还是函数内部的生命周期？"]
     
-    G --> H["如果是特定生命周期 'a"]
-    H --> I["F: Fn(&'a str) -> &'a str"]
-    I --> J["那么 F 只对这个 'a 有效"]
+    G --> H["如果是特定生命周期 &quot;a"]
+    H --> I["F: Fn(&amp;&quot;a str) -&gt; &amp;&quot;a str"]
+    I --> J["那么 F 只对这个 &quot;a 有效"]
     J --> K["但我们想要对任意生命周期都有效"]
     
     K --> L["解决方案：HRTB"]
-    L --> M["F: for&lt;'a&gt; Fn(&'a str) -> &'a str"]
-    M --> N["表示：对于任意生命周期 'a，F 都有效"]
+    L --> M["F: for&lt;&quot;a&gt; Fn(&amp;&quot;a str) -&gt; &amp;&quot;a str"]
+    M --> N["表示：对于任意生命周期 &quot;a，F 都有效"]
     
     style A fill:#ffebee
     style L fill:#e8f5e8
