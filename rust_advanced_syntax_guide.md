@@ -1558,25 +1558,29 @@ fn main() {
 
 ```mermaid
 graph TB
-    A[特质边界的作用] --> B[约束泛型参数的能力]
-    A --> C[编译时类型检查]
-    A --> D[启用特定的方法调用]
+    A["特质边界的作用"] --> B["约束泛型参数的能力"]
+    A --> C["编译时类型检查"]
+    A --> D["启用特定的方法调用"]
     
-    E[特质边界语法] --> F[基础语法: T: Trait]
-    E --> G[多个约束: T: Trait1 + Trait2]
-    E --> H[where子句: where T: Trait]
-    E --> I[条件实现: impl<T: Trait>]
+    E["特质边界语法"] --> F["基础语法: T: Trait"]
+    E --> G["多个约束: T: Trait1 + Trait2"]
+    E --> H["where子句: where T: Trait"]
+    E --> I["条件实现: impl&lt;T: Trait&gt;"]
     
-    J[高级用法] --> K[关联类型约束]
-    J --> L[高阶特质边界 HRTB]
-    J --> M[条件性特质实现]
-    J --> N[返回位置impl Trait]
+    J["高级用法"] --> K["关联类型约束"]
+    J --> L["高阶特质边界 HRTB"]
+    J --> M["条件性特质实现"]
+    J --> N["返回位置impl Trait"]
     
-    O[与其他语言对比] --> P[Java: 泛型通配符]
-    O --> Q[C++: 模板特化]
-    O --> R[Haskell: 类型类约束]
-    O --> S[Rust: 特质边界]
+    O["与其他语言对比"] --> P["Java: 泛型通配符"]
+    O --> Q["C++: 模板特化"]
+    O --> R["Haskell: 类型类约束"]
+    O --> S["Rust: 特质边界"]
     
+    style A fill:#e3f2fd
+    style E fill:#f3e5f5
+    style J fill:#e8f5e8
+    style O fill:#fce4ec
     style B fill:#e1f5fe
     style C fill:#c8e6c9
     style D fill:#c8e6c9
