@@ -438,22 +438,29 @@ fn main() {
 
 ```mermaid
 graph TB
-    A[核心理解] --> B[普通生命周期：F: Fn(&'a str) -> &'a str]
-    A --> C[HRTB：F: for<'a> Fn(&'a str) -> &'a str]
+    A["核心理解"] --> B["普通生命周期：F: Fn(&'a str) -> &'a str"]
+    A --> C["HRTB：F: for&lt;'a&gt; Fn(&'a str) -> &'a str"]
     
-    B --> D[只对特定的 'a 有效]
-    B --> E[像是说：F 只能处理生命周期为 'a 的字符串]
+    B --> D["只对特定的 'a 有效"]
+    B --> E["像是说：F 只能处理生命周期为 'a 的字符串"]
     
-    C --> F[对任意 'a 都有效]
-    C --> G[像是说：F 能处理任意生命周期的字符串]
+    C --> F["对任意 'a 都有效"]
+    C --> G["像是说：F 能处理任意生命周期的字符串"]
     
-    H[何时使用] --> I[函数参数是函数或闭包]
-    I --> J[该函数处理引用类型]
-    J --> K[需要对任意生命周期都有效]
+    H["何时使用"] --> I["函数参数是函数或闭包"]
+    I --> J["该函数处理引用类型"]
+    J --> K["需要对任意生命周期都有效"]
     
-    L[简单判断] --> M[编译器抱怨生命周期不匹配]
-    M --> N[你的函数应该能处理任意生命周期的数据]
-    N --> O[试试 HRTB！]
+    L["简单判断"] --> M["编译器抱怨生命周期不匹配"]
+    M --> N["你的函数应该能处理任意生命周期的数据"]
+    N --> O["试试 HRTB！"]
+    
+    style A fill:#e3f2fd
+    style H fill:#f3e5f5
+    style L fill:#e8f5e8
+    style C fill:#fff3e0
+    style K fill:#fce4ec
+    style O fill:#fff3e0
 ```
 
 ### 静态生命周期 (`'static`) 详解
@@ -10769,6 +10776,1157 @@ async fn run_all_channel_demos() {
     demo_message_routing_system().await;
     println!();
     demo_streaming_pipeline().await;
+}
+```
+
+### Actor模式实现详解
+
+Actor模式是一种高级并发模式，每个Actor是一个独立的计算单元，通过消息传递进行通信，避免了共享状态的复杂性。
+
+#### Demo 1: 基础Actor系统实现
+
+```rust
+use tokio::sync::{mpsc, oneshot};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+// Actor特质定义
+#[async_trait::async_trait]
+trait Actor: Send + 'static {
+    type Message: Send;
+    type State: Send;
+    
+    async fn handle_message(&mut self, message: Self::Message, state: &mut Self::State) -> Result<(), ActorError>;
+    
+    async fn pre_start(&mut self, _state: &mut Self::State) -> Result<(), ActorError> {
+        Ok(())
+    }
+    
+    async fn post_stop(&mut self, _state: &mut Self::State) -> Result<(), ActorError> {
+        Ok(())
+    }
+}
+
+// Actor错误类型
+#[derive(Debug)]
+enum ActorError {
+    MessageHandlingFailed(String),
+    ActorStopped,
+    ActorPanicked,
+}
+
+// Actor引用
+#[derive(Debug, Clone)]
+struct ActorRef<M> {
+    sender: mpsc::Sender<ActorMessage<M>>,
+    id: String,
+}
+
+impl<M: Send + 'static> ActorRef<M> {
+    async fn send(&self, message: M) -> Result<(), ActorError> {
+        self.sender.send(ActorMessage::UserMessage(message)).await
+            .map_err(|_| ActorError::ActorStopped)
+    }
+    
+    async fn stop(&self) -> Result<(), ActorError> {
+        self.sender.send(ActorMessage::Stop).await
+            .map_err(|_| ActorError::ActorStopped)
+    }
+    
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+// 内部Actor消息类型
+enum ActorMessage<M> {
+    UserMessage(M),
+    Stop,
+}
+
+// Actor系统
+struct ActorSystem {
+    actors: Arc<tokio::sync::Mutex<HashMap<String, Box<dyn std::any::Any + Send>>>>,
+}
+
+impl ActorSystem {
+    fn new() -> Self {
+        Self {
+            actors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
+    
+    async fn spawn_actor<A, M, S>(&self, mut actor: A, mut state: S, id: String) -> ActorRef<M>
+    where
+        A: Actor<Message = M, State = S> + 'static,
+        M: Send + 'static,
+        S: Send + 'static,
+    {
+        let (sender, mut receiver) = mpsc::channel::<ActorMessage<M>>(100);
+        let actor_ref = ActorRef {
+            sender: sender.clone(),
+            id: id.clone(),
+        };
+        
+        // 存储Actor引用
+        {
+            let mut actors = self.actors.lock().await;
+            actors.insert(id.clone(), Box::new(sender));
+        }
+        
+        // 启动Actor
+        tokio::spawn(async move {
+            println!("Actor {} starting", id);
+            
+            // 调用pre_start
+            if let Err(e) = actor.pre_start(&mut state).await {
+                println!("Actor {} pre_start failed: {:?}", id, e);
+                return;
+            }
+            
+            // 消息处理循环
+            while let Some(message) = receiver.recv().await {
+                match message {
+                    ActorMessage::UserMessage(user_msg) => {
+                        if let Err(e) = actor.handle_message(user_msg, &mut state).await {
+                            println!("Actor {} message handling failed: {:?}", id, e);
+                            break;
+                        }
+                    }
+                    ActorMessage::Stop => {
+                        println!("Actor {} received stop signal", id);
+                        break;
+                    }
+                }
+            }
+            
+            // 调用post_stop
+            if let Err(e) = actor.post_stop(&mut state).await {
+                println!("Actor {} post_stop failed: {:?}", id, e);
+            }
+            
+            println!("Actor {} stopped", id);
+        });
+        
+        actor_ref
+    }
+}
+
+// 计数器Actor示例
+struct CounterActor;
+
+#[derive(Debug)]
+enum CounterMessage {
+    Increment,
+    Decrement,
+    GetValue(oneshot::Sender<i64>),
+    SetValue(i64),
+    Reset,
+}
+
+#[derive(Debug)]
+struct CounterState {
+    value: i64,
+    operation_count: u64,
+    last_operation: Option<Instant>,
+}
+
+impl CounterState {
+    fn new() -> Self {
+        Self {
+            value: 0,
+            operation_count: 0,
+            last_operation: None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Actor for CounterActor {
+    type Message = CounterMessage;
+    type State = CounterState;
+    
+    async fn handle_message(&mut self, message: Self::Message, state: &mut Self::State) -> Result<(), ActorError> {
+        state.operation_count += 1;
+        state.last_operation = Some(Instant::now());
+        
+        match message {
+            CounterMessage::Increment => {
+                state.value += 1;
+                println!("Counter incremented to: {}", state.value);
+            }
+            CounterMessage::Decrement => {
+                state.value -= 1;
+                println!("Counter decremented to: {}", state.value);
+            }
+            CounterMessage::GetValue(reply) => {
+                let _ = reply.send(state.value);
+                println!("Counter value requested: {}", state.value);
+            }
+            CounterMessage::SetValue(new_value) => {
+                state.value = new_value;
+                println!("Counter value set to: {}", new_value);
+            }
+            CounterMessage::Reset => {
+                state.value = 0;
+                println!("Counter reset to: 0");
+            }
+        }
+        
+        Ok(())
+    }
+    
+    async fn pre_start(&mut self, state: &mut Self::State) -> Result<(), ActorError> {
+        println!("CounterActor pre_start: initial value = {}", state.value);
+        Ok(())
+    }
+    
+    async fn post_stop(&mut self, state: &mut Self::State) -> Result<(), ActorError> {
+        println!("CounterActor post_stop: final value = {}, operations = {}", 
+            state.value, state.operation_count);
+        Ok(())
+    }
+}
+
+// 工作管理器Actor
+struct WorkManagerActor;
+
+#[derive(Debug)]
+enum WorkMessage {
+    AddWork(String),
+    CompleteWork(String),
+    GetStatus(oneshot::Sender<WorkStatus>),
+    ListPendingWork(oneshot::Sender<Vec<String>>),
+}
+
+#[derive(Debug, Clone)]
+struct WorkStatus {
+    pending_count: usize,
+    completed_count: usize,
+    total_processing_time: Duration,
+}
+
+#[derive(Debug)]
+struct WorkState {
+    pending_work: HashMap<String, Instant>,
+    completed_work: Vec<(String, Duration)>,
+    start_time: Instant,
+}
+
+impl WorkState {
+    fn new() -> Self {
+        Self {
+            pending_work: HashMap::new(),
+            completed_work: Vec::new(),
+            start_time: Instant::now(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Actor for WorkManagerActor {
+    type Message = WorkMessage;
+    type State = WorkState;
+    
+    async fn handle_message(&mut self, message: Self::Message, state: &mut Self::State) -> Result<(), ActorError> {
+        match message {
+            WorkMessage::AddWork(work_id) => {
+                state.pending_work.insert(work_id.clone(), Instant::now());
+                println!("Work added: {} (pending: {})", work_id, state.pending_work.len());
+            }
+            WorkMessage::CompleteWork(work_id) => {
+                if let Some(start_time) = state.pending_work.remove(&work_id) {
+                    let duration = start_time.elapsed();
+                    state.completed_work.push((work_id.clone(), duration));
+                    println!("Work completed: {} (took {:?})", work_id, duration);
+                } else {
+                    println!("Work not found: {}", work_id);
+                }
+            }
+            WorkMessage::GetStatus(reply) => {
+                let total_time: Duration = state.completed_work.iter()
+                    .map(|(_, duration)| *duration)
+                    .sum();
+                
+                let status = WorkStatus {
+                    pending_count: state.pending_work.len(),
+                    completed_count: state.completed_work.len(),
+                    total_processing_time: total_time,
+                };
+                
+                let _ = reply.send(status);
+            }
+            WorkMessage::ListPendingWork(reply) => {
+                let pending: Vec<String> = state.pending_work.keys().cloned().collect();
+                let _ = reply.send(pending);
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+async fn demo_basic_actor_system() {
+    println!("=== Demo 1: 基础Actor系统实现 ===");
+    
+    let actor_system = ActorSystem::new();
+    
+    // 创建计数器Actor
+    let counter_ref = actor_system.spawn_actor(
+        CounterActor,
+        CounterState::new(),
+        "counter1".to_string(),
+    ).await;
+    
+    // 创建工作管理器Actor
+    let work_manager_ref = actor_system.spawn_actor(
+        WorkManagerActor,
+        WorkState::new(),
+        "work_manager1".to_string(),
+    ).await;
+    
+    // 测试计数器Actor
+    println!("\n--- Testing Counter Actor ---");
+    counter_ref.send(CounterMessage::Increment).await.unwrap();
+    counter_ref.send(CounterMessage::Increment).await.unwrap();
+    counter_ref.send(CounterMessage::Decrement).await.unwrap();
+    counter_ref.send(CounterMessage::SetValue(100)).await.unwrap();
+    
+    // 获取计数器值
+    let (tx, rx) = oneshot::channel();
+    counter_ref.send(CounterMessage::GetValue(tx)).await.unwrap();
+    let value = rx.await.unwrap();
+    println!("Final counter value: {}", value);
+    
+    // 测试工作管理器Actor
+    println!("\n--- Testing Work Manager Actor ---");
+    work_manager_ref.send(WorkMessage::AddWork("task1".to_string())).await.unwrap();
+    work_manager_ref.send(WorkMessage::AddWork("task2".to_string())).await.unwrap();
+    work_manager_ref.send(WorkMessage::AddWork("task3".to_string())).await.unwrap();
+    
+    // 模拟工作完成
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    work_manager_ref.send(WorkMessage::CompleteWork("task1".to_string())).await.unwrap();
+    
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    work_manager_ref.send(WorkMessage::CompleteWork("task2".to_string())).await.unwrap();
+    
+    // 获取状态
+    let (tx, rx) = oneshot::channel();
+    work_manager_ref.send(WorkMessage::GetStatus(tx)).await.unwrap();
+    let status = rx.await.unwrap();
+    println!("Work status: {:?}", status);
+    
+    // 获取待处理工作列表
+    let (tx, rx) = oneshot::channel();
+    work_manager_ref.send(WorkMessage::ListPendingWork(tx)).await.unwrap();
+    let pending = rx.await.unwrap();
+    println!("Pending work: {:?}", pending);
+    
+    // 停止Actors
+    counter_ref.stop().await.unwrap();
+    work_manager_ref.stop().await.unwrap();
+    
+    // 等待Actor停止
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+```
+
+#### Demo 2: 高级Actor通信模式
+
+```rust
+use tokio::sync::{mpsc, oneshot, broadcast};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+// 高级Actor特质
+#[async_trait::async_trait]
+trait AdvancedActor: Send + 'static {
+    type Message: Send + Clone;
+    
+    async fn receive(&mut self, message: Self::Message, context: &mut ActorContext) -> ActorResult;
+    
+    async fn pre_start(&mut self, _context: &mut ActorContext) -> ActorResult {
+        Ok(())
+    }
+    
+    async fn post_stop(&mut self, _context: &mut ActorContext) -> ActorResult {
+        Ok(())
+    }
+}
+
+type ActorResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+// Actor上下文
+struct ActorContext {
+    self_ref: Option<AdvancedActorRef>,
+    system: Arc<AdvancedActorSystem>,
+    watchers: Vec<AdvancedActorRef>,
+    children: HashMap<String, AdvancedActorRef>,
+}
+
+impl ActorContext {
+    fn new(system: Arc<AdvancedActorSystem>) -> Self {
+        Self {
+            self_ref: None,
+            system,
+            watchers: Vec::new(),
+            children: HashMap::new(),
+        }
+    }
+    
+    async fn spawn_child<A, M>(&mut self, actor: A, name: String) -> Result<AdvancedActorRef, Box<dyn std::error::Error + Send + Sync>>
+    where
+        A: AdvancedActor<Message = M> + 'static,
+        M: Send + Clone + 'static,
+    {
+        let child_ref = self.system.spawn(actor, format!("{}/{}", self.self_ref.as_ref().unwrap().path, name)).await?;
+        self.children.insert(name, child_ref.clone());
+        Ok(child_ref)
+    }
+    
+    fn watch(&mut self, actor_ref: AdvancedActorRef) {
+        self.watchers.push(actor_ref);
+    }
+    
+    async fn broadcast_to_children<M>(&self, message: M) 
+    where
+        M: Clone + Send + 'static,
+    {
+        for child_ref in self.children.values() {
+            let _ = child_ref.send(message.clone()).await;
+        }
+    }
+}
+
+// 高级Actor引用
+#[derive(Debug, Clone)]
+struct AdvancedActorRef {
+    sender: mpsc::Sender<ActorEnvelope>,
+    path: String,
+    system: Arc<AdvancedActorSystem>,
+}
+
+impl AdvancedActorRef {
+    async fn send<M>(&self, message: M) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        M: Send + 'static,
+    {
+        let envelope = ActorEnvelope {
+            message: Box::new(message),
+            sender: self.path.clone(),
+        };
+        
+        self.sender.send(envelope).await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+    
+    async fn ask<M, R>(&self, message: M) -> Result<R, Box<dyn std::error::Error + Send + Sync>>
+    where
+        M: Send + 'static,
+        R: Send + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        // 这里简化实现，实际需要更复杂的ask模式
+        self.send(message).await?;
+        
+        // 模拟响应
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        rx.await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+}
+
+// Actor消息信封
+struct ActorEnvelope {
+    message: Box<dyn std::any::Any + Send>,
+    sender: String,
+}
+
+// 高级Actor系统
+struct AdvancedActorSystem {
+    actors: Arc<tokio::sync::RwLock<HashMap<String, AdvancedActorRef>>>,
+    event_bus: broadcast::Sender<SystemEvent>,
+}
+
+#[derive(Debug, Clone)]
+enum SystemEvent {
+    ActorStarted(String),
+    ActorStopped(String),
+    ActorFailed(String, String),
+    MessageSent(String, String), // from, to
+}
+
+impl AdvancedActorSystem {
+    fn new() -> Arc<Self> {
+        let (event_bus, _) = broadcast::channel(1000);
+        
+        Arc::new(Self {
+            actors: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            event_bus,
+        })
+    }
+    
+    async fn spawn<A, M>(self: Arc<Self>, mut actor: A, path: String) -> Result<AdvancedActorRef, Box<dyn std::error::Error + Send + Sync>>
+    where
+        A: AdvancedActor<Message = M> + 'static,
+        M: Send + Clone + 'static,
+    {
+        let (sender, mut receiver) = mpsc::channel::<ActorEnvelope>(1000);
+        let actor_ref = AdvancedActorRef {
+            sender: sender.clone(),
+            path: path.clone(),
+            system: self.clone(),
+        };
+        
+        // 注册Actor
+        {
+            let mut actors = self.actors.write().await;
+            actors.insert(path.clone(), actor_ref.clone());
+        }
+        
+        // 发布启动事件
+        let _ = self.event_bus.send(SystemEvent::ActorStarted(path.clone()));
+        
+        // 启动Actor
+        let system_clone = self.clone();
+        let path_clone = path.clone();
+        tokio::spawn(async move {
+            let mut context = ActorContext::new(system_clone.clone());
+            context.self_ref = Some(actor_ref.clone());
+            
+            // 调用pre_start
+            if let Err(e) = actor.pre_start(&mut context).await {
+                println!("Actor {} pre_start failed: {}", path_clone, e);
+                let _ = system_clone.event_bus.send(SystemEvent::ActorFailed(path_clone.clone(), e.to_string()));
+                return;
+            }
+            
+            // 消息处理循环
+            while let Some(envelope) = receiver.recv().await {
+                // 尝试将消息转换为正确类型
+                if let Ok(message) = envelope.message.downcast::<M>() {
+                    let _ = system_clone.event_bus.send(SystemEvent::MessageSent(envelope.sender, path_clone.clone()));
+                    
+                    if let Err(e) = actor.receive(*message, &mut context).await {
+                        println!("Actor {} message handling failed: {}", path_clone, e);
+                        let _ = system_clone.event_bus.send(SystemEvent::ActorFailed(path_clone.clone(), e.to_string()));
+                        break;
+                    }
+                }
+            }
+            
+            // 调用post_stop
+            if let Err(e) = actor.post_stop(&mut context).await {
+                println!("Actor {} post_stop failed: {}", path_clone, e);
+            }
+            
+            // 发布停止事件
+            let _ = system_clone.event_bus.send(SystemEvent::ActorStopped(path_clone.clone()));
+            
+            // 从系统中移除Actor
+            {
+                let mut actors = system_clone.actors.write().await;
+                actors.remove(&path_clone);
+            }
+        });
+        
+        Ok(actor_ref)
+    }
+    
+    fn subscribe_events(&self) -> broadcast::Receiver<SystemEvent> {
+        self.event_bus.subscribe()
+    }
+}
+
+// 聊天室Actor
+struct ChatRoomActor {
+    participants: HashMap<String, AdvancedActorRef>,
+    message_history: Vec<ChatMessage>,
+}
+
+#[derive(Debug, Clone)]
+enum ChatRoomMessage {
+    Join(String, AdvancedActorRef),
+    Leave(String),
+    SendMessage(ChatMessage),
+    GetHistory(oneshot::Sender<Vec<ChatMessage>>),
+}
+
+#[derive(Debug, Clone)]
+struct ChatMessage {
+    sender: String,
+    content: String,
+    timestamp: Instant,
+}
+
+impl ChatRoomActor {
+    fn new() -> Self {
+        Self {
+            participants: HashMap::new(),
+            message_history: Vec::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AdvancedActor for ChatRoomActor {
+    type Message = ChatRoomMessage;
+    
+    async fn receive(&mut self, message: Self::Message, _context: &mut ActorContext) -> ActorResult {
+        match message {
+            ChatRoomMessage::Join(username, user_ref) => {
+                self.participants.insert(username.clone(), user_ref);
+                println!("User {} joined the chat room", username);
+                
+                // 广播加入消息
+                let join_msg = ChatMessage {
+                    sender: "system".to_string(),
+                    content: format!("{} joined the chat", username),
+                    timestamp: Instant::now(),
+                };
+                
+                self.broadcast_message(join_msg.clone()).await?;
+                self.message_history.push(join_msg);
+            }
+            ChatRoomMessage::Leave(username) => {
+                self.participants.remove(&username);
+                println!("User {} left the chat room", username);
+                
+                // 广播离开消息
+                let leave_msg = ChatMessage {
+                    sender: "system".to_string(),
+                    content: format!("{} left the chat", username),
+                    timestamp: Instant::now(),
+                };
+                
+                self.broadcast_message(leave_msg.clone()).await?;
+                self.message_history.push(leave_msg);
+            }
+            ChatRoomMessage::SendMessage(message) => {
+                println!("Broadcasting message from {}: {}", message.sender, message.content);
+                self.broadcast_message(message.clone()).await?;
+                self.message_history.push(message);
+            }
+            ChatRoomMessage::GetHistory(reply) => {
+                let _ = reply.send(self.message_history.clone());
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+impl ChatRoomActor {
+    async fn broadcast_message(&self, message: ChatMessage) -> ActorResult {
+        for participant_ref in self.participants.values() {
+            participant_ref.send(UserMessage::ReceiveMessage(message.clone())).await?;
+        }
+        Ok(())
+    }
+}
+
+// 用户Actor
+struct UserActor {
+    username: String,
+    received_messages: Vec<ChatMessage>,
+}
+
+#[derive(Debug, Clone)]
+enum UserMessage {
+    ReceiveMessage(ChatMessage),
+    GetMessages(oneshot::Sender<Vec<ChatMessage>>),
+}
+
+impl UserActor {
+    fn new(username: String) -> Self {
+        Self {
+            username,
+            received_messages: Vec::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AdvancedActor for UserActor {
+    type Message = UserMessage;
+    
+    async fn receive(&mut self, message: Self::Message, _context: &mut ActorContext) -> ActorResult {
+        match message {
+            UserMessage::ReceiveMessage(chat_message) => {
+                println!("User {} received: {} - {}", 
+                    self.username, chat_message.sender, chat_message.content);
+                self.received_messages.push(chat_message);
+            }
+            UserMessage::GetMessages(reply) => {
+                let _ = reply.send(self.received_messages.clone());
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+async fn demo_advanced_actor_communication() {
+    println!("=== Demo 2: 高级Actor通信模式 ===");
+    
+    let system = AdvancedActorSystem::new();
+    
+    // 订阅系统事件
+    let mut event_receiver = system.subscribe_events();
+    tokio::spawn(async move {
+        while let Ok(event) = event_receiver.recv().await {
+            println!("System Event: {:?}", event);
+        }
+    });
+    
+    // 创建聊天室Actor
+    let chat_room_ref = system.spawn(
+        ChatRoomActor::new(),
+        "/system/chatroom".to_string(),
+    ).await.unwrap();
+    
+    // 创建用户Actors
+    let user1_ref = system.spawn(
+        UserActor::new("Alice".to_string()),
+        "/users/alice".to_string(),
+    ).await.unwrap();
+    
+    let user2_ref = system.spawn(
+        UserActor::new("Bob".to_string()),
+        "/users/bob".to_string(),
+    ).await.unwrap();
+    
+    let user3_ref = system.spawn(
+        UserActor::new("Charlie".to_string()),
+        "/users/charlie".to_string(),
+    ).await.unwrap();
+    
+    // 用户加入聊天室
+    chat_room_ref.send(ChatRoomMessage::Join("Alice".to_string(), user1_ref.clone())).await.unwrap();
+    chat_room_ref.send(ChatRoomMessage::Join("Bob".to_string(), user2_ref.clone())).await.unwrap();
+    chat_room_ref.send(ChatRoomMessage::Join("Charlie".to_string(), user3_ref.clone())).await.unwrap();
+    
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    
+    // 发送聊天消息
+    let messages = vec![
+        ChatMessage {
+            sender: "Alice".to_string(),
+            content: "Hello everyone!".to_string(),
+            timestamp: Instant::now(),
+        },
+        ChatMessage {
+            sender: "Bob".to_string(),
+            content: "Hi Alice! How are you?".to_string(),
+            timestamp: Instant::now(),
+        },
+        ChatMessage {
+            sender: "Charlie".to_string(),
+            content: "Great to see you all here!".to_string(),
+            timestamp: Instant::now(),
+        },
+    ];
+    
+    for message in messages {
+        chat_room_ref.send(ChatRoomMessage::SendMessage(message)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    
+    // Bob离开聊天室
+    chat_room_ref.send(ChatRoomMessage::Leave("Bob".to_string())).await.unwrap();
+    
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    
+    // 获取消息历史
+    let (tx, rx) = oneshot::channel();
+    chat_room_ref.send(ChatRoomMessage::GetHistory(tx)).await.unwrap();
+    let history = rx.await.unwrap();
+    
+    println!("\nChat History:");
+    for msg in history {
+        println!("  [{}] {}: {}", 
+            msg.timestamp.elapsed().as_millis(), msg.sender, msg.content);
+    }
+    
+    // 等待系统清理
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+```
+
+### 无锁数据结构详解
+
+无锁数据结构通过原子操作和内存排序来实现线程安全，避免了锁的开销和死锁风险。
+
+#### Demo 1: 无锁栈和队列实现
+
+```rust
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::ptr;
+use std::mem;
+
+// 无锁栈实现
+struct LockFreeStack<T> {
+    head: AtomicPtr<Node<T>>,
+    size: AtomicUsize,
+}
+
+struct Node<T> {
+    data: T,
+    next: *mut Node<T>,
+}
+
+impl<T> LockFreeStack<T> {
+    fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(ptr::null_mut()),
+            size: AtomicUsize::new(0),
+        }
+    }
+    
+    fn push(&self, data: T) {
+        let new_node = Box::into_raw(Box::new(Node {
+            data,
+            next: ptr::null_mut(),
+        }));
+        
+        loop {
+            let current_head = self.head.load(Ordering::Acquire);
+            
+            unsafe {
+                (*new_node).next = current_head;
+            }
+            
+            match self.head.compare_exchange_weak(
+                current_head,
+                new_node,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.size.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                Err(_) => continue, // 重试
+            }
+        }
+    }
+    
+    fn pop(&self) -> Option<T> {
+        loop {
+            let current_head = self.head.load(Ordering::Acquire);
+            
+            if current_head.is_null() {
+                return None;
+            }
+            
+            let next = unsafe { (*current_head).next };
+            
+            match self.head.compare_exchange_weak(
+                current_head,
+                next,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.size.fetch_sub(1, Ordering::Relaxed);
+                    let data = unsafe { Box::from_raw(current_head) }.data;
+                    return Some(data);
+                }
+                Err(_) => continue, // 重试
+            }
+        }
+    }
+    
+    fn is_empty(&self) -> bool {
+        self.head.load(Ordering::Acquire).is_null()
+    }
+    
+    fn size(&self) -> usize {
+        self.size.load(Ordering::Relaxed)
+    }
+}
+
+impl<T> Drop for LockFreeStack<T> {
+    fn drop(&mut self) {
+        while self.pop().is_some() {}
+    }
+}
+
+// 无锁队列实现（Michael & Scott算法）
+struct LockFreeQueue<T> {
+    head: AtomicPtr<QueueNode<T>>,
+    tail: AtomicPtr<QueueNode<T>>,
+    size: AtomicUsize,
+}
+
+struct QueueNode<T> {
+    data: Option<T>,
+    next: AtomicPtr<QueueNode<T>>,
+}
+
+impl<T> LockFreeQueue<T> {
+    fn new() -> Self {
+        let dummy = Box::into_raw(Box::new(QueueNode {
+            data: None,
+            next: AtomicPtr::new(ptr::null_mut()),
+        }));
+        
+        Self {
+            head: AtomicPtr::new(dummy),
+            tail: AtomicPtr::new(dummy),
+            size: AtomicUsize::new(0),
+        }
+    }
+    
+    fn enqueue(&self, data: T) {
+        let new_node = Box::into_raw(Box::new(QueueNode {
+            data: Some(data),
+            next: AtomicPtr::new(ptr::null_mut()),
+        }));
+        
+        loop {
+            let tail = self.tail.load(Ordering::Acquire);
+            let next = unsafe { (*tail).next.load(Ordering::Acquire) };
+            
+            if tail == self.tail.load(Ordering::Acquire) {
+                if next.is_null() {
+                    // 尝试链接新节点
+                    match unsafe { (*tail).next.compare_exchange_weak(
+                        next,
+                        new_node,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    ) } {
+                        Ok(_) => {
+                            // 成功链接，现在移动尾指针
+                            let _ = self.tail.compare_exchange_weak(
+                                tail,
+                                new_node,
+                                Ordering::Release,
+                                Ordering::Relaxed,
+                            );
+                            self.size.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                        Err(_) => continue,
+                    }
+                } else {
+                    // 帮助其他线程移动尾指针
+                    let _ = self.tail.compare_exchange_weak(
+                        tail,
+                        next,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+        }
+    }
+    
+    fn dequeue(&self) -> Option<T> {
+        loop {
+            let head = self.head.load(Ordering::Acquire);
+            let tail = self.tail.load(Ordering::Acquire);
+            let next = unsafe { (*head).next.load(Ordering::Acquire) };
+            
+            if head == self.head.load(Ordering::Acquire) {
+                if head == tail {
+                    if next.is_null() {
+                        return None; // 队列为空
+                    }
+                    
+                    // 帮助移动尾指针
+                    let _ = self.tail.compare_exchange_weak(
+                        tail,
+                        next,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    );
+                } else {
+                    if next.is_null() {
+                        continue;
+                    }
+                    
+                    // 读取数据
+                    let data = unsafe { (*next).data.take() };
+                    
+                    // 移动头指针
+                    match self.head.compare_exchange_weak(
+                        head,
+                        next,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            unsafe { Box::from_raw(head) }; // 释放旧头节点
+                            if let Some(data) = data {
+                                self.size.fetch_sub(1, Ordering::Relaxed);
+                                return Some(data);
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+    }
+    
+    fn is_empty(&self) -> bool {
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+        let next = unsafe { (*head).next.load(Ordering::Acquire) };
+        head == tail && next.is_null()
+    }
+    
+    fn size(&self) -> usize {
+        self.size.load(Ordering::Relaxed)
+    }
+}
+
+async fn demo_lockfree_stack_queue() {
+    println!("=== Demo 1: 无锁栈和队列实现 ===");
+    
+    // 测试无锁栈
+    println!("--- Testing Lock-Free Stack ---");
+    let stack = Arc::new(LockFreeStack::new());
+    let mut handles = Vec::new();
+    
+    // 多线程推入数据
+    for i in 0..10 {
+        let stack_clone = stack.clone();
+        handles.push(tokio::task::spawn_blocking(move || {
+            for j in 0..100 {
+                stack_clone.push(i * 100 + j);
+            }
+        }));
+    }
+    
+    // 等待所有推入完成
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    
+    println!("Stack size after pushing: {}", stack.size());
+    
+    // 多线程弹出数据
+    let mut handles = Vec::new();
+    let popped_counts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    
+    for i in 0..5 {
+        let stack_clone = stack.clone();
+        let counts_clone = popped_counts.clone();
+        handles.push(tokio::task::spawn_blocking(move || {
+            let mut count = 0;
+            while let Some(_) = stack_clone.pop() {
+                count += 1;
+                if count >= 200 { break; }
+            }
+            counts_clone.lock().unwrap().push((i, count));
+        }));
+    }
+    
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    
+    println!("Pop counts per thread: {:?}", popped_counts.lock().unwrap());
+    println!("Stack size after popping: {}", stack.size());
+    
+    // 测试无锁队列
+    println!("\n--- Testing Lock-Free Queue ---");
+    let queue = Arc::new(LockFreeQueue::new());
+    let mut handles = Vec::new();
+    
+    // 多线程入队
+    for i in 0..10 {
+        let queue_clone = queue.clone();
+        handles.push(tokio::task::spawn_blocking(move || {
+            for j in 0..100 {
+                queue_clone.enqueue(format!("item-{}-{}", i, j));
+            }
+        }));
+    }
+    
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    
+    println!("Queue size after enqueuing: {}", queue.size());
+    
+    // 多线程出队
+    let mut handles = Vec::new();
+    let dequeued_counts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    
+    for i in 0..5 {
+        let queue_clone = queue.clone();
+        let counts_clone = dequeued_counts.clone();
+        handles.push(tokio::task::spawn_blocking(move || {
+            let mut count = 0;
+            let mut items = Vec::new();
+            while let Some(item) = queue_clone.dequeue() {
+                items.push(item);
+                count += 1;
+                if count >= 200 { break; }
+            }
+            counts_clone.lock().unwrap().push((i, count, items.len()));
+        }));
+    }
+    
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    
+    println!("Dequeue counts per thread: {:?}", dequeued_counts.lock().unwrap());
+    println!("Queue size after dequeuing: {}", queue.size());
+}
+```
+
+### 总结
+
+这三个demo展示了高级并发模式的不同方面：
+
+- **Demo 1**: 通道和消息传递，展示了多种通道类型的组合使用
+- **Demo 2**: Actor模式实现，展示了基础和高级Actor通信模式  
+- **Demo 3**: 无锁数据结构，展示了无锁栈和队列的实现
+
+```mermaid
+graph TB
+    A["Rust 高级并发模式"] --> B["通道模式"]
+    A --> C["Actor模式"]
+    A --> D["无锁模式"]
+    
+    B --> E["MPSC多生产者单消费者"]
+    B --> F["Broadcast广播"]
+    B --> G["Watch状态监听"]
+    B --> H["Oneshot一次性"]
+    
+    C --> I["消息传递"]
+    C --> J["状态隔离"]
+    C --> K["监督机制"]
+    C --> L["位置透明"]
+    
+    D --> M["原子操作"]
+    D --> N["内存排序"]
+    D --> O["CAS操作"]
+    D --> P["无阻塞算法"]
+    
+    style A fill:#e3f2fd
+    style B fill:#f3e5f5
+    style C fill:#e8f5e8
+    style D fill:#fff3e0
+```
+
+// 运行所有并发演示
+async fn run_all_concurrency_demos() {
+    run_all_channel_demos().await;
+    println!();
+    demo_basic_actor_system().await;
+    println!();
+    demo_advanced_actor_communication().await;
+    println!();
+    demo_lockfree_stack_queue().await;
 }
 ```
 
